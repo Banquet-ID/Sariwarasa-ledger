@@ -141,6 +141,10 @@ class UserCreate(BaseModel):
     role: str = "team"
 
 
+class RoleUpdate(BaseModel):
+    role: str
+
+
 @api_router.post("/auth/login")
 async def login(input: LoginInput):
     user = await db.users.find_one({"email": input.email.lower().strip()}, {"_id": 0})
@@ -212,17 +216,49 @@ async def create_user(input: UserCreate, user=Depends(require_owner)):
     email = input.email.lower().strip()
     if input.role not in ("owner", "team"):
         raise HTTPException(status_code=400, detail="Role tidak valid")
+    if len(input.password) < 6:
+        raise HTTPException(status_code=400, detail="Password minimal 6 karakter")
+    if not input.name.strip():
+        raise HTTPException(status_code=400, detail="Nama wajib diisi")
     if await db.users.find_one({"email": email}):
         raise HTTPException(status_code=400, detail="Email sudah terdaftar")
     doc = {
         "user_id": f"user_{uuid.uuid4().hex[:12]}",
-        "email": email, "name": input.name, "picture": None,
+        "email": email, "name": input.name.strip(), "picture": None,
         "role": input.role,
         "password_hash": bcrypt.hashpw(input.password.encode(), bcrypt.gensalt()).decode(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.users.insert_one(doc)
+    await audit(user, "create", "user", doc["user_id"], f"{email} role={input.role}")
     return public_user(doc)
+
+
+@api_router.put("/users/{user_id}/role")
+async def update_user_role(user_id: str, input: RoleUpdate, user=Depends(require_owner)):
+    if input.role not in ("owner", "team"):
+        raise HTTPException(status_code=400, detail="Role tidak valid")
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Tidak bisa mengubah role akun sendiri")
+    target = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+    await db.users.update_one({"user_id": user_id}, {"$set": {"role": input.role}})
+    await audit(user, "update_role", "user", user_id, f"{target['email']} -> {input.role}")
+    return public_user({**target, "role": input.role})
+
+
+@api_router.delete("/users/{user_id}")
+async def delete_user(user_id: str, user=Depends(require_owner)):
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="Tidak bisa menghapus akun sendiri")
+    target = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(status_code=404, detail="User tidak ditemukan")
+    await db.users.delete_one({"user_id": user_id})
+    await db.user_sessions.delete_many({"user_id": user_id})
+    await audit(user, "delete", "user", user_id, target["email"])
+    return {"ok": True}
 
 
 # ---------------- Meta / Master data ----------------

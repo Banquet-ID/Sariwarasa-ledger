@@ -29,6 +29,11 @@ Web app internal untuk mencatat pemasukan, pengeluaran, hutang, piutang, dan sal
 - [x] Duplicate warning dasar (jenis+nominal+tanggal+sumber sama)
 - [x] Testing: 22/22 pytest backend, semua flow UI kritis lulus (iteration_1.json)
 
+## Implemented (2026-08-24) — Manajemen User
+- [x] Halaman Pengaturan (owner only): daftar user, tambah user (nama/email/password/role), ubah role, hapus user (sesi ikut dicabut)
+- [x] Proteksi: owner tidak bisa ubah role/hapus akun sendiri; password min 6 karakter; semua aksi masuk audit log
+- [x] Testing: 18/18 pytest (test_user_management.py) + flow UI lulus (iteration_2.json)
+
 ## Backlog
 ### P0
 - (Belum ada — semua core lulus)

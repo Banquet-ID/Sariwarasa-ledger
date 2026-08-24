@@ -11,6 +11,8 @@ import Events from "@/pages/Events";
 import Debts from "@/pages/Debts";
 import Reports from "@/pages/Reports";
 
+import Settings from "@/pages/Settings";
+
 function Protected() {
   const { user, loading } = useAuth();
   const location = useLocation();
@@ -41,6 +43,7 @@ function AppRouter() {
         <Route path="/event" element={<Events />} />
         <Route path="/hutang-piutang" element={<Debts />} />
         <Route path="/laporan" element={<Reports />} />
+        <Route path="/pengaturan" element={<Settings />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

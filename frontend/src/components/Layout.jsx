@@ -4,7 +4,7 @@ import { useAuth } from "@/context/AuthContext";
 import BalanceTicker from "@/components/BalanceTicker";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import {
-  LayoutDashboard, ArrowLeftRight, CalendarDays, HandCoins, BarChart3, LogOut, Menu, Wallet,
+  LayoutDashboard, ArrowLeftRight, CalendarDays, HandCoins, BarChart3, LogOut, Menu, Wallet, Settings as SettingsIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
@@ -14,12 +14,15 @@ const NAV = [
   { to: "/event", label: "Revenue Event", icon: CalendarDays, testid: "nav-events" },
   { to: "/hutang-piutang", label: "Hutang & Piutang", icon: HandCoins, testid: "nav-debts" },
   { to: "/laporan", label: "Laporan", icon: BarChart3, testid: "nav-reports" },
+  { to: "/pengaturan", label: "Pengaturan", icon: SettingsIcon, testid: "nav-settings", ownerOnly: true },
 ];
 
 function NavItems({ onNavigate }) {
+  const { isOwner } = useAuth();
+  const items = NAV.filter((item) => !item.ownerOnly || isOwner);
   return (
     <nav className="space-y-1">
-      {NAV.map((item) => (
+      {items.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
