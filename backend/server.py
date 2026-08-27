@@ -10,12 +10,10 @@ from pathlib import Path
 import os
 import logging
 import uuid
-import base64
 import json
 import re
 import bcrypt
 import jwt
-import requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -24,9 +22,8 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 JWT_SECRET = os.environ['JWT_SECRET']
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY')
 
-OWNER_EMAIL = "andhry.adhriyanto@gmail.com"
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "andhry.adhriyanto@gmail.com")
 
 FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"]
 REVENUE_CATEGORIES = ["Events", "Catering"]
@@ -42,41 +39,9 @@ api_router = APIRouter(prefix="/api")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ---------------- Object Storage ----------------
-STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
-STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
-storage_key = None
-
-
-def init_storage(force: bool = False):
-    global storage_key
-    if storage_key and not force:
-        return storage_key
-    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_LLM_KEY}, timeout=30)
-    resp.raise_for_status()
-    storage_key = resp.json()["storage_key"]
-    return storage_key
-
-
-def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    resp = requests.put(f"{STORAGE_URL}/objects/{path}",
-                        headers={"X-Storage-Key": key, "Content-Type": content_type},
-                        data=data, timeout=120)
-    if resp.status_code == 404:
-        key = init_storage(force=True)
-        resp = requests.put(f"{STORAGE_URL}/objects/{path}",
-                            headers={"X-Storage-Key": key, "Content-Type": content_type},
-                            data=data, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_object(path: str):
-    key = init_storage()
-    resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+# ---------------- Storage & AI providers ----------------
+from storage import put_object, get_object, storage_configured
+from ai_provider import extract_receipt
 
 
 # ---------------- Auth ----------------
@@ -130,8 +95,8 @@ class LoginInput(BaseModel):
     password: str
 
 
-class GoogleSessionInput(BaseModel):
-    session_id: str
+class GoogleTokenInput(BaseModel):
+    credential: str
 
 
 class UserCreate(BaseModel):
@@ -159,36 +124,33 @@ async def login(input: LoginInput):
     return {"token": token, "user": public_user(user)}
 
 
-@api_router.post("/auth/google-session")
-async def google_session(input: GoogleSessionInput, response: Response):
-    resp = requests.get(
-        "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-        headers={"X-Session-ID": input.session_id}, timeout=15)
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Session Google tidak valid")
-    data = resp.json()
-    email = data["email"].lower()
+@api_router.post("/auth/google")
+async def google_login(input: GoogleTokenInput):
+    client_id = os.environ.get("GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(status_code=503, detail="Login Google belum dikonfigurasi (GOOGLE_CLIENT_ID)")
+    from google.oauth2 import id_token as google_id_token
+    from google.auth.transport import requests as google_requests
+    try:
+        info = google_id_token.verify_oauth2_token(input.credential, google_requests.Request(), client_id)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token Google tidak valid")
+    email = info["email"].lower()
     user = await db.users.find_one({"email": email}, {"_id": 0})
     if not user:
         role = "owner" if email == OWNER_EMAIL else "team"
         user = {
             "user_id": f"user_{uuid.uuid4().hex[:12]}",
-            "email": email, "name": data.get("name"), "picture": data.get("picture"),
+            "email": email, "name": info.get("name"), "picture": info.get("picture"),
             "role": role, "password_hash": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         await db.users.insert_one(user)
-    session_token = data["session_token"]
-    await db.user_sessions.delete_many({"user_id": user["user_id"]})
-    await db.user_sessions.insert_one({
-        "user_id": user["user_id"],
-        "session_token": session_token,
-        "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
-    response.set_cookie("session_token", session_token, httponly=True, secure=True,
-                        samesite="none", path="/", max_age=7 * 24 * 3600)
-    return public_user(user)
+    token = jwt.encode(
+        {"user_id": user["user_id"], "role": user["role"],
+         "exp": datetime.now(timezone.utc) + timedelta(days=7)},
+        JWT_SECRET, algorithm="HS256")
+    return {"token": token, "user": public_user(user)}
 
 
 @api_router.get("/auth/me")
@@ -623,15 +585,10 @@ async def ai_extract(file: UploadFile = File(...), user=Depends(require_owner)):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
 
-    from emergentintegrations.llm.chat import LlmChat, UserMessage, ImageContent
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=f"extract-{uuid.uuid4().hex[:8]}",
-        system_message="Anda adalah mesin ekstraksi data keuangan. Selalu jawab dengan JSON valid saja.",
-    ).with_model("openai", "gpt-5.6-terra")
-    image_content = ImageContent(image_base64=base64.b64encode(data).decode())
-    response_text = await chat.send_message(
-        UserMessage(text=AI_PROMPT, file_contents=[image_content]))
+    try:
+        response_text = await extract_receipt(data, file.content_type, AI_PROMPT)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     text = response_text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
@@ -751,29 +708,33 @@ async def report_pnl(month: str = None, user=Depends(get_current_user)):
 # ---------------- Startup ----------------
 @app.on_event("startup")
 async def startup():
-    seeds = [
-        (OWNER_EMAIL, "Andhry (Owner)", "owner"),
-        ("team@sariwarasa.com", "Team Sariwarasa", "team"),
-    ]
-    for email, name, role in seeds:
-        existing = await db.users.find_one({"email": email}, {"_id": 0})
-        if not existing:
-            await db.users.insert_one({
-                "user_id": f"user_{uuid.uuid4().hex[:12]}",
-                "email": email, "name": name, "picture": None, "role": role,
-                "password_hash": bcrypt.hashpw("sariwarasa123".encode(), bcrypt.gensalt()).decode(),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            })
-            logger.info(f"Seeded user {email} ({role})")
-    try:
-        init_storage()
-        logger.info("Object storage initialized")
-    except Exception as e:
-        logger.error(f"Storage init failed: {e}")
+    seed_password = os.environ.get("SEED_PASSWORD")
+    if seed_password:
+        seeds = [
+            (OWNER_EMAIL, "Andhry (Owner)", "owner"),
+            ("team@sariwarasa.com", "Team Sariwarasa", "team"),
+        ]
+        for email, name, role in seeds:
+            existing = await db.users.find_one({"email": email}, {"_id": 0})
+            if not existing:
+                await db.users.insert_one({
+                    "user_id": f"user_{uuid.uuid4().hex[:12]}",
+                    "email": email, "name": name, "picture": None, "role": role,
+                    "password_hash": bcrypt.hashpw(seed_password.encode(), bcrypt.gensalt()).decode(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info(f"Seeded user {email} ({role})")
+    else:
+        logger.info("SEED_PASSWORD tidak diset — skip seeding akun default")
+    if storage_configured():
+        logger.info("S3-compatible storage configured")
+    else:
+        logger.warning("Storage belum dikonfigurasi — set S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY untuk upload file")
 
 
 app.include_router(api_router)
 
+# Production: set CORS_ORIGINS ke URL frontend Vercel, cth: CORS_ORIGINS="https://app.vercel.app"
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,

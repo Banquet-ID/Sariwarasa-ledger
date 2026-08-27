@@ -1,18 +1,51 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
+import api from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Wallet, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
+const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+
 export default function Login() {
-  const { user, loading, login } = useAuth();
+  const { user, loading, login, setUser } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID || document.getElementById("gsi-script")) return;
+    const script = document.createElement("script");
+    script.id = "gsi-script";
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+      window.google?.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: async (resp) => {
+          try {
+            const r = await api.post("/auth/google", { credential: resp.credential });
+            localStorage.setItem("sw_token", r.data.token);
+            setUser(r.data.user);
+            navigate("/", { replace: true });
+          } catch (err) {
+            toast.error(err.response?.data?.detail || "Login Google gagal");
+          }
+        },
+      });
+      window.google?.accounts.id.renderButton(
+        document.getElementById("google-signin-button"),
+        { theme: "outline", size: "large", width: 320, text: "signin_with", locale: "id" }
+      );
+    };
+    document.body.appendChild(script);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!loading && user) return <Navigate to="/" replace />;
 
@@ -27,12 +60,6 @@ export default function Login() {
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const handleGoogle = () => {
-    // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-    const redirectUrl = window.location.origin + "/";
-    window.location.href = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
   };
 
   return (
@@ -102,26 +129,22 @@ export default function Login() {
             </Button>
           </form>
 
-          <div className="flex items-center gap-3 my-5">
-            <div className="h-px flex-1 bg-slate-200" />
-            <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">atau</span>
-            <div className="h-px flex-1 bg-slate-200" />
-          </div>
-
-          <Button
-            variant="outline"
-            data-testid="login-google-btn"
-            onClick={handleGoogle}
-            className="w-full rounded-lg active:scale-95 transition-transform duration-150"
-          >
-            <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24">
-              <path fill="#4285F4" d="M23.5 12.3c0-.9-.1-1.5-.3-2.2H12v4.3h6.5c-.1 1.1-.8 2.7-2.4 3.8l-.02.15 3.5 2.7.24.02c2.2-2 3.46-5 3.46-8.78z"/>
-              <path fill="#34A853" d="M12 24c3.2 0 5.9-1.06 7.9-2.9l-3.76-2.9c-1 .7-2.36 1.2-4.1 1.2-3.14 0-5.8-2.1-6.76-5l-.14.01-3.68 2.85-.05.13C3.36 21.3 7.34 24 12 24z"/>
-              <path fill="#FBBC05" d="M5.24 14.4c-.24-.72-.38-1.5-.38-2.4s.14-1.68.36-2.4l-.01-.16-3.72-2.9-.12.05C.5 8.3 0 10.06 0 12s.5 3.7 1.37 5.4l3.87-3z"/>
-              <path fill="#EA4335" d="M12 4.6c2.24 0 3.75.97 4.6 1.78l3.37-3.3C17.87 1.1 15.2 0 12 0 7.34 0 3.36 2.7 1.37 6.6l3.86 3c.96-2.9 3.62-5 6.77-5z"/>
-            </svg>
-            Masuk dengan Google
-          </Button>
+          {GOOGLE_CLIENT_ID ? (
+            <>
+              <div className="flex items-center gap-3 my-5">
+                <div className="h-px flex-1 bg-slate-200" />
+                <span className="text-xs text-slate-400 font-bold uppercase tracking-wider">atau</span>
+                <div className="h-px flex-1 bg-slate-200" />
+              </div>
+              <div className="flex justify-center" data-testid="login-google-btn">
+                <div id="google-signin-button" />
+              </div>
+            </>
+          ) : (
+            <p className="text-xs text-slate-400 mt-5 text-center">
+              Login Google nonaktif — REACT_APP_GOOGLE_CLIENT_ID belum diset.
+            </p>
+          )}
         </div>
       </div>
     </div>

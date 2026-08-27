@@ -8,13 +8,13 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "https://sariwarasa-ledger.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8001").rstrip("/")
 API = f"{BASE_URL}/api"
 
 OWNER_EMAIL = "andhry.adhriyanto@gmail.com"
-OWNER_PASS = "sariwarasa123"
+OWNER_PASS = os.environ.get("TEST_OWNER_PASSWORD", "")
 TEAM_EMAIL = "team@sariwarasa.com"
-TEAM_PASS = "sariwarasa123"
+TEAM_PASS = os.environ.get("TEST_TEAM_PASSWORD", "")
 
 
 def _login(email, password):

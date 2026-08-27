@@ -78,6 +78,17 @@ agenthub/agents/youtube/db
 
 memory/test_credentials.md
 
+# Platform-internal files (not part of the deployable repo)
+.emergent/
+memory/
+test_reports/
+test_result.md
+tests/
+auth_testing.md
+image_testing.md
+design_guidelines.json
+frontend/yarn.lock
+
 # Mobile development
 android-sdk/frontend/node_modules/.cache/default-development/3.pack
 .env
@@ -87,3 +98,4 @@ credentials.json
 *.key
 .credentials
 frontend/node_modules/.cache/default-development/0.pack
+.gitconfig
