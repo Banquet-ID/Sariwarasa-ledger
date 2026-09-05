@@ -735,10 +735,12 @@ async def startup():
 app.include_router(api_router)
 
 # Production: set CORS_ORIGINS ke URL frontend Vercel, cth: CORS_ORIGINS="https://app.vercel.app"
+# Auth memakai Bearer token (bukan cookie), sehingga "*" juga valid tanpa credentials.
+_cors_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=False,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
