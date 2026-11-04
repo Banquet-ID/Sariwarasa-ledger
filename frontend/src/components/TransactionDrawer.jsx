@@ -25,6 +25,19 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  // Daftar kategori pengeluaran diambil dari server (bisa diatur di Pengaturan);
+  // konstanta dipakai hanya sebagai cadangan bila request gagal.
+  const [expenseCategories, setExpenseCategories] = useState(EXPENSE_CATEGORIES);
+
+  useEffect(() => {
+    if (!open) return;
+    api.get("/expense-categories")
+      .then((r) => {
+        const names = r.data.categories.map((c) => c.name);
+        if (names.length) setExpenseCategories(names);
+      })
+      .catch(() => {});
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -140,9 +153,9 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
 
   const categoryOptions = useMemo(() => {
     if (form.type === "income") return INCOME_GROUPS;
-    if (form.type === "expense") return [{ group: "Pengeluaran", categories: EXPENSE_CATEGORIES }];
+    if (form.type === "expense") return [{ group: "Pengeluaran", categories: expenseCategories }];
     return [];
-  }, [form.type]);
+  }, [form.type, expenseCategories]);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>

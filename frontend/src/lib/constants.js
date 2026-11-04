@@ -5,6 +5,7 @@ export const INCOME_GROUPS = [
   { group: "Non-revenue", categories: ["Pembayaran Piutang", "Other"] },
 ];
 
+// Hanya cadangan (fallback). Daftar yang berlaku diambil dari API /expense-categories.
 export const EXPENSE_CATEGORIES = [
   "Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
   "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya",

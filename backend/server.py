@@ -29,8 +29,14 @@ FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"]
 REVENUE_CATEGORIES = ["Events", "Catering"]
 NON_REVENUE_CATEGORIES = ["Pembayaran Piutang", "Other"]
 INCOME_CATEGORIES = REVENUE_CATEGORIES + NON_REVENUE_CATEGORIES
-EXPENSE_CATEGORIES = ["Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
-                      "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya"]
+# Kategori pengeluaran default. Dipakai sebagai seed awal ke koleksi `expense_categories`;
+# setelah itu daftar yang berlaku diambil dari database (bisa ditambah/diubah/dihapus di Pengaturan).
+DEFAULT_EXPENSE_CATEGORIES = ["Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
+                              "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya"]
+# Kategori yang dipakai logika sistem sehingga tidak boleh diubah namanya / dihapus:
+# "Bayar Hutang" dibuat otomatis oleh modul Hutang & Piutang, "Lainnya" adalah kategori
+# fallback yang wajib catatan.
+PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Lainnya"}
 NOTE_REQUIRED_CATEGORIES = {"Other", "Lainnya"}
 
 app = FastAPI()
@@ -223,6 +229,131 @@ async def delete_user(user_id: str, user=Depends(require_owner)):
     return {"ok": True}
 
 
+# ---------------- Audit ----------------
+async def audit(user: dict, action: str, entity: str, entity_id: str, detail: str = ""):
+    await db.audit_logs.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["user_id"], "email": user["email"],
+        "action": action, "entity": entity, "entity_id": entity_id, "detail": detail,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+# ---------------- Expense categories (master data, bisa diatur di Pengaturan) ----------------
+class ExpenseCategoryInput(BaseModel):
+    name: str
+
+
+async def ensure_expense_categories():
+    """Seed kategori default sekali saja bila koleksi masih kosong.
+
+    Dilakukan lazy (bukan hanya saat startup) karena di Vercel serverless event startup
+    tidak selalu berjalan.
+    """
+    if await db.expense_categories.count_documents({}) > 0:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    await db.expense_categories.insert_many([
+        {"id": str(uuid.uuid4()), "name": name, "order": i, "created_at": now}
+        for i, name in enumerate(DEFAULT_EXPENSE_CATEGORIES)
+    ])
+
+
+async def get_expense_category_names() -> list:
+    await ensure_expense_categories()
+    docs = await db.expense_categories.find({}, {"_id": 0, "name": 1}).sort("order", 1).to_list(500)
+    return [d["name"] for d in docs]
+
+
+def clean_category_name(raw: str) -> str:
+    name = re.sub(r"\s+", " ", (raw or "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Nama kategori wajib diisi")
+    if len(name) > 50:
+        raise HTTPException(status_code=400, detail="Nama kategori maksimal 50 karakter")
+    return name
+
+
+async def find_category_by_name(name: str, exclude_id: str = None):
+    q = {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    return await db.expense_categories.find_one(q, {"_id": 0})
+
+
+def category_out(c: dict, used: int = 0) -> dict:
+    return {"id": c["id"], "name": c["name"], "order": c.get("order", 0),
+            "protected": c["name"] in PROTECTED_EXPENSE_CATEGORIES, "usage_count": used}
+
+
+@api_router.get("/expense-categories")
+async def list_expense_categories(user=Depends(get_current_user)):
+    await ensure_expense_categories()
+    docs = await db.expense_categories.find({}, {"_id": 0}).sort("order", 1).to_list(500)
+    counts = {}
+    async for row in db.transactions.aggregate([
+        {"$match": {"type": "expense", "category": {"$ne": None}}},
+        {"$group": {"_id": "$category", "n": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = row["n"]
+    return {"categories": [category_out(c, counts.get(c["name"], 0)) for c in docs]}
+
+
+@api_router.post("/expense-categories")
+async def create_expense_category(input: ExpenseCategoryInput, user=Depends(require_owner)):
+    await ensure_expense_categories()
+    name = clean_category_name(input.name)
+    if await find_category_by_name(name):
+        raise HTTPException(status_code=400, detail=f"Kategori \"{name}\" sudah ada")
+    last = await db.expense_categories.find({}, {"_id": 0, "order": 1}).sort("order", -1).to_list(1)
+    doc = {"id": str(uuid.uuid4()), "name": name,
+           "order": (last[0]["order"] + 1) if last else 0,
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.expense_categories.insert_one(doc)
+    await audit(user, "create", "expense_category", doc["id"], name)
+    return category_out(doc)
+
+
+@api_router.put("/expense-categories/{category_id}")
+async def update_expense_category(category_id: str, input: ExpenseCategoryInput,
+                                  user=Depends(require_owner)):
+    existing = await db.expense_categories.find_one({"id": category_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Kategori tidak ditemukan")
+    if existing["name"] in PROTECTED_EXPENSE_CATEGORIES:
+        raise HTTPException(status_code=400,
+                            detail=f"Kategori \"{existing['name']}\" dipakai sistem dan tidak bisa diubah")
+    name = clean_category_name(input.name)
+    if await find_category_by_name(name, exclude_id=category_id):
+        raise HTTPException(status_code=400, detail=f"Kategori \"{name}\" sudah ada")
+    if name != existing["name"]:
+        await db.expense_categories.update_one({"id": category_id}, {"$set": {"name": name}})
+        # Transaksi lama ikut dipindah ke nama baru agar riwayat & laporan tetap konsisten.
+        await db.transactions.update_many({"type": "expense", "category": existing["name"]},
+                                          {"$set": {"category": name}})
+        await audit(user, "update", "expense_category", category_id, f"{existing['name']} -> {name}")
+    return category_out({**existing, "name": name})
+
+
+@api_router.delete("/expense-categories/{category_id}")
+async def delete_expense_category(category_id: str, user=Depends(require_owner)):
+    existing = await db.expense_categories.find_one({"id": category_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Kategori tidak ditemukan")
+    if existing["name"] in PROTECTED_EXPENSE_CATEGORIES:
+        raise HTTPException(status_code=400,
+                            detail=f"Kategori \"{existing['name']}\" dipakai sistem dan tidak bisa dihapus")
+    used = await db.transactions.count_documents({"type": "expense", "category": existing["name"]})
+    if used > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Kategori \"{existing['name']}\" masih dipakai {used} transaksi. "
+                   "Ubah kategori transaksi tersebut atau ganti nama kategori ini saja.")
+    await db.expense_categories.delete_one({"id": category_id})
+    await audit(user, "delete", "expense_category", category_id, existing["name"])
+    return {"ok": True}
+
+
 # ---------------- Meta / Master data ----------------
 @api_router.get("/meta")
 async def get_meta(user=Depends(get_current_user)):
@@ -232,18 +363,8 @@ async def get_meta(user=Depends(get_current_user)):
             {"group": "Revenue", "categories": REVENUE_CATEGORIES},
             {"group": "Non-revenue", "categories": NON_REVENUE_CATEGORIES},
         ],
-        "expense_categories": EXPENSE_CATEGORIES,
+        "expense_categories": await get_expense_category_names(),
     }
-
-
-# ---------------- Audit ----------------
-async def audit(user: dict, action: str, entity: str, entity_id: str, detail: str = ""):
-    await db.audit_logs.insert_one({
-        "id": str(uuid.uuid4()),
-        "user_id": user["user_id"], "email": user["email"],
-        "action": action, "entity": entity, "entity_id": entity_id, "detail": detail,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
 
 
 @api_router.get("/audit-logs")
@@ -268,7 +389,7 @@ class TransactionCreate(BaseModel):
     status: str = "final"
 
 
-def validate_tx(data: dict, for_final: bool):
+async def validate_tx(data: dict, for_final: bool):
     if data["type"] not in ("income", "expense", "transfer"):
         raise HTTPException(status_code=400, detail="Jenis transaksi tidak valid")
     if not for_final:
@@ -284,7 +405,7 @@ def validate_tx(data: dict, for_final: bool):
             raise HTTPException(status_code=400, detail="Sumber dana tujuan tidak valid")
     else:
         cat = data.get("category")
-        valid = INCOME_CATEGORIES if data["type"] == "income" else EXPENSE_CATEGORIES
+        valid = INCOME_CATEGORIES if data["type"] == "income" else await get_expense_category_names()
         if cat not in valid:
             raise HTTPException(status_code=400, detail="Kategori tidak valid")
         notes = (data.get("notes") or "").strip()
@@ -322,7 +443,7 @@ async def list_transactions(type: str = None, status: str = None, fund_source: s
 @api_router.post("/transactions")
 async def create_transaction(input: TransactionCreate, user=Depends(require_owner)):
     data = input.model_dump()
-    validate_tx(data, for_final=(data["status"] == "final"))
+    await validate_tx(data, for_final=(data["status"] == "final"))
     now = datetime.now(timezone.utc).isoformat()
     doc = {"id": str(uuid.uuid4()), **data, "source": "manual", "ai_extraction": None,
            "debt_id": None, "debt_payment_id": None,
@@ -348,7 +469,7 @@ async def update_transaction(tx_id: str, input: TransactionCreate, user=Depends(
         raise HTTPException(status_code=400,
                             detail="Transaksi pembayaran hutang/piutang hanya bisa diubah dari modul Hutang & Piutang")
     data = input.model_dump()
-    validate_tx(data, for_final=(data["status"] == "final"))
+    await validate_tx(data, for_final=(data["status"] == "final"))
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.transactions.update_one({"id": tx_id}, {"$set": data})
     await audit(user, "update", "transaction", tx_id,
@@ -562,7 +683,7 @@ Ekstrak dan kembalikan HANYA JSON valid tanpa markdown, tanpa penjelasan:
  "warnings": ["hal yang ambigu atau perlu dicek user"]
 }
 Kategori pemasukan: Events, Catering, Pembayaran Piutang, Other.
-Kategori pengeluaran: Buah, Guest Supplies, Cup, Transportasi, Sewa Tempat, Operational Event, Marketing, Printing, Bayar Hutang, Akomodasi, Lainnya.
+Kategori pengeluaran: __EXPENSE_CATEGORIES__.
 Aturan: struk belanja/tagihan keluar -> expense. Uang masuk/transfer masuk -> income. Jika ambigu, type="unknown" dan jelaskan di warnings. Untuk mutasi bank, pilih transaksi yang paling jelas."""
 
 
@@ -585,8 +706,10 @@ async def ai_extract(file: UploadFile = File(...), user=Depends(require_owner)):
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
 
+    expense_categories = await get_expense_category_names()
+    prompt = AI_PROMPT.replace("__EXPENSE_CATEGORIES__", ", ".join(expense_categories))
     try:
-        response_text = await extract_receipt(data, file.content_type, AI_PROMPT)
+        response_text = await extract_receipt(data, file.content_type, prompt)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -600,7 +723,7 @@ async def ai_extract(file: UploadFile = File(...), user=Depends(require_owner)):
 
     tx_type = extraction.get("type") if extraction.get("type") in ("income", "expense") else "unknown"
     cat = extraction.get("suggested_category")
-    if cat not in INCOME_CATEGORIES + EXPENSE_CATEGORIES:
+    if cat not in INCOME_CATEGORIES + expense_categories:
         cat = None
     fs = extraction.get("suggested_fund_source")
     if fs not in FUND_SOURCES:
