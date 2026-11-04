@@ -1,3 +1,6 @@
+// constants.js - Master data constants with API sync capability
+// Hardcoded values serve as fallbacks; runtime data comes from /api/meta
+
 export const FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"];
 
 export const INCOME_GROUPS = [
@@ -5,17 +8,91 @@ export const INCOME_GROUPS = [
   { group: "Non-revenue", categories: ["Pembayaran Piutang", "Other"] },
 ];
 
-// Hanya cadangan (fallback). Daftar yang berlaku diambil dari API /expense-categories.
+// Fallback only. Runtime categories come from API /expense-categories
 export const EXPENSE_CATEGORIES = [
   "Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
   "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya",
 ];
 
+// Fallback only. Runtime categories come from API /income-categories
 export const REVENUE_CATEGORIES = ["Events", "Catering"];
 
+// Protected categories that cannot be deleted/renamed (system logic depends on them)
+export const PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Lainnya"};
+export const PROTECTED_INCOME_CATEGORIES = {"Pembayaran Piutang", "Other"};
+export const NOTE_REQUIRED_CATEGORIES = {"Other", "Lainnya"};
+
+
+// ---------- Dynamic data fetching from API ----------
+import api from "@/lib/api";
+
+let _dynamicFundSources = null;
+let _dynamicIncomeGroups = null;
+let _dynamicExpenseCategories = null;
+let _metaLoaded = false;
+
+export async function loadMeta() {
+  if (_metaLoaded) return;
+  try {
+    const res = await api.get("/meta");
+    _dynamicFundSources = res.data.fund_sources || FUND_SOURCES;
+    _dynamicIncomeGroups = res.data.income_groups || INCOME_GROUPS;
+    _dynamicExpenseCategories = res.data.expense_categories || EXPENSE_CATEGORIES;
+    _metaLoaded = true;
+  } catch (e) {
+    console.warn("Failed to load meta from API, using fallbacks:", e);
+    _dynamicFundSources = FUND_SOURCES;
+    _dynamicIncomeGroups = INCOME_GROUPS;
+    _dynamicExpenseCategories = EXPENSE_CATEGORIES;
+    _metaLoaded = true;
+  }
+}
+
+export function getFundSources() {
+  return _dynamicFundSources || FUND_SOURCES;
+}
+
+export function getIncomeGroups() {
+  return _dynamicIncomeGroups || INCOME_GROUPS;
+}
+
+export function getExpenseCategories() {
+  return _dynamicExpenseCategories || EXPENSE_CATEGORIES;
+}
+
+export function getRevenueCategories() {
+  const groups = getIncomeGroups();
+  const revenueGroup = groups.find(g => g.group === "Revenue");
+  return revenueGroup?.categories || REVENUE_CATEGORIES;
+}
+
+export function getNonRevenueCategories() {
+  const groups = getIncomeGroups();
+  const nonRevenueGroup = groups.find(g => g.group === "Non-revenue");
+  return nonRevenueGroup?.categories || ["Pembayaran Piutang", "Other"];
+}
+
+export function getAllIncomeCategories() {
+  const groups = getIncomeGroups();
+  return groups.flatMap(g => g.categories);
+}
+
+export function isMetaLoaded() {
+  return _metaLoaded;
+}
+
+export function resetMeta() {
+  _metaLoaded = false;
+  _dynamicFundSources = null;
+  _dynamicIncomeGroups = null;
+  _dynamicExpenseCategories = null;
+}
+
+
+// ---------- Transaction kind detection (uses dynamic revenue categories) ----------
 export function txKind(t) {
   if (t.type === "transfer") return "transfer";
-  if (t.type === "income") return REVENUE_CATEGORIES.includes(t.category) ? "revenue" : "non_revenue";
+  if (t.type === "income") return getRevenueCategories().includes(t.category) ? "revenue" : "non_revenue";
   return "expense";
 }
 

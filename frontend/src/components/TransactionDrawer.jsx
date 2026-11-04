@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { FUND_SOURCES, INCOME_GROUPS, EXPENSE_CATEGORIES } from "@/lib/constants";
+import { getFundSources, getIncomeGroups, loadMeta, EXPENSE_CATEGORIES } from "@/lib/constants";
 import { todayStr } from "@/lib/format";
 import { toast } from "sonner";
 import { Sparkles, Loader2, AlertTriangle, Paperclip, ImageIcon } from "lucide-react";
@@ -25,12 +25,14 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
   const [aiLoading, setAiLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
-  // Daftar kategori pengeluaran diambil dari server (bisa diatur di Pengaturan);
-  // konstanta dipakai hanya sebagai cadangan bila request gagal.
+  // Expense categories fetched from server (manageable in Settings)
   const [expenseCategories, setExpenseCategories] = useState(EXPENSE_CATEGORIES);
 
   useEffect(() => {
     if (!open) return;
+    // Load dynamic meta (fund sources, income groups, expense categories)
+    loadMeta();
+    // Also fetch expense categories specifically
     api.get("/expense-categories")
       .then((r) => {
         const names = r.data.categories.map((c) => c.name);
@@ -152,10 +154,12 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
   };
 
   const categoryOptions = useMemo(() => {
-    if (form.type === "income") return INCOME_GROUPS;
+    if (form.type === "income") return getIncomeGroups();
     if (form.type === "expense") return [{ group: "Pengeluaran", categories: expenseCategories }];
     return [];
   }, [form.type, expenseCategories]);
+
+  const fundSources = useMemo(() => getFundSources(), []);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -285,7 +289,7 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
                   <SelectValue placeholder="Pilih sumber dana" />
                 </SelectTrigger>
                 <SelectContent>
-                  {FUND_SOURCES.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
+                  {fundSources.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -297,7 +301,7 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
                     <SelectValue placeholder="Pilih tujuan" />
                   </SelectTrigger>
                   <SelectContent>
-                    {FUND_SOURCES.filter((fs) => fs !== form.fund_source).map((fs) => (
+                    {fundSources.filter((fs) => fs !== form.fund_source).map((fs) => (
                       <SelectItem key={fs} value={fs}>{fs}</SelectItem>
                     ))}
                   </SelectContent>
