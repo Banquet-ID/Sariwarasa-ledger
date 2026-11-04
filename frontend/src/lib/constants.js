@@ -18,9 +18,9 @@ export const EXPENSE_CATEGORIES = [
 export const REVENUE_CATEGORIES = ["Events", "Catering"];
 
 // Protected categories that cannot be deleted/renamed (system logic depends on them)
-export const PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Lainnya"};
-export const PROTECTED_INCOME_CATEGORIES = {"Pembayaran Piutang", "Other"};
-export const NOTE_REQUIRED_CATEGORIES = {"Other", "Lainnya"};
+export const PROTECTED_EXPENSE_CATEGORIES = new Set(["Bayar Hutang", "Lainnya"]);
+export const PROTECTED_INCOME_CATEGORIES = new Set(["Pembayaran Piutang", "Other"]);
+export const NOTE_REQUIRED_CATEGORIES = new Set(["Other", "Lainnya"]);
 
 
 // ---------- Dynamic data fetching from API ----------

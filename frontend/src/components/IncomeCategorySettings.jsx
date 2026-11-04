@@ -85,7 +85,7 @@ function CategoryDialog({ open, onOpenChange, category, onSaved }) {
             className="w-full rounded-lg active:scale-95 transition-transform duration-150">
             {isEdit ? "Simpan Perubahan" : "Tambah Kategori"}
           </Button>
-        </div      </DialogContent>
+        </div>      </DialogContent>
     </Dialog>
   );
 }
