@@ -566,6 +566,11 @@ async def update_fund_source(fs_id: str, input: FundSourceInput, user=Depends(re
         # Update transactions that reference this fund source
         await db.transactions.update_many({"fund_source": existing["name"]}, {"$set": {"fund_source": name}})
         await db.transactions.update_many({"to_fund_source": existing["name"]}, {"$set": {"to_fund_source": name}})
+        # Riwayat pembayaran hutang/piutang menyimpan nama sumber dana di dalam dokumen debts.
+        await db.debts.update_many(
+            {"payments.fund_source": existing["name"]},
+            {"$set": {"payments.$[p].fund_source": name}},
+            array_filters=[{"p.fund_source": existing["name"]}])
         await audit(user, "update", "fund_source", fs_id, f"{existing['name']} -> {name}")
     return fund_source_out({**existing, "name": name})
 

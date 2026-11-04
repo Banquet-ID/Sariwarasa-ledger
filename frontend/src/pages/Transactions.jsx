@@ -2,7 +2,8 @@ import { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import api from "@/lib/api";
 import { formatIDR, formatDate } from "@/lib/format";
-import { txKind, KIND_META, amountColor, FUND_SOURCES } from "@/lib/constants";
+import { txKind, KIND_META, amountColor } from "@/lib/constants";
+import useFundSources from "@/hooks/use-fund-sources";
 import { useAuth } from "@/context/AuthContext";
 import TransactionDrawer from "@/components/TransactionDrawer";
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,7 @@ import { toast } from "sonner";
 
 export default function Transactions() {
   const { isOwner } = useAuth();
+  const fundSourceNames = useFundSources();
   const [searchParams] = useSearchParams();
   const [txs, setTxs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -91,7 +93,7 @@ export default function Transactions() {
           <SelectTrigger className="w-40" data-testid="filter-fund-source"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Semua Sumber</SelectItem>
-            {FUND_SOURCES.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
+            {fundSourceNames.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
           </SelectContent>
         </Select>
         <Select value={filters.status} onValueChange={(v) => setFilters((f) => ({ ...f, status: v }))}>

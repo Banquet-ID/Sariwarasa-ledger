@@ -31,8 +31,9 @@ let _dynamicIncomeGroups = null;
 let _dynamicExpenseCategories = null;
 let _metaLoaded = false;
 
-export async function loadMeta() {
-  if (_metaLoaded) return;
+// force=true mengambil ulang dari server (dipakai saat form dibuka agar perubahan di Pengaturan ikut terbaca).
+export async function loadMeta(force = false) {
+  if (_metaLoaded && !force) return;
   try {
     const res = await api.get("/meta");
     _dynamicFundSources = res.data.fund_sources || FUND_SOURCES;

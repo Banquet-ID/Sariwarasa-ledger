@@ -27,11 +27,18 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
   const [uploading, setUploading] = useState(false);
   // Expense categories fetched from server (manageable in Settings)
   const [expenseCategories, setExpenseCategories] = useState(EXPENSE_CATEGORIES);
+  // Sumber dana & grup pemasukan disimpan di state dan dimuat ulang tiap form dibuka,
+  // supaya perubahan di Pengaturan (ganti nama / tambah) langsung muncul di dropdown.
+  const [fundSources, setFundSources] = useState(() => getFundSources());
+  const [incomeGroups, setIncomeGroups] = useState(() => getIncomeGroups());
 
   useEffect(() => {
     if (!open) return;
     // Load dynamic meta (fund sources, income groups, expense categories)
-    loadMeta();
+    loadMeta(true).then(() => {
+      setFundSources(getFundSources());
+      setIncomeGroups(getIncomeGroups());
+    });
     // Also fetch expense categories specifically
     api.get("/expense-categories")
       .then((r) => {
@@ -154,12 +161,10 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
   };
 
   const categoryOptions = useMemo(() => {
-    if (form.type === "income") return getIncomeGroups();
+    if (form.type === "income") return incomeGroups;
     if (form.type === "expense") return [{ group: "Pengeluaran", categories: expenseCategories }];
     return [];
-  }, [form.type, expenseCategories]);
-
-  const fundSources = useMemo(() => getFundSources(), []);
+  }, [form.type, expenseCategories, incomeGroups]);
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>

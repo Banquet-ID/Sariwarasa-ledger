@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api from "@/lib/api";
 import { formatIDR, formatDate, todayStr } from "@/lib/format";
-import { FUND_SOURCES } from "@/lib/constants";
+import useFundSources from "@/hooks/use-fund-sources";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -86,6 +86,7 @@ function DebtDialog({ open, onOpenChange, type, onSaved }) {
 }
 
 function PaymentDialog({ open, onOpenChange, debt, onSaved }) {
+  const fundSourceNames = useFundSources();
   const [form, setForm] = useState({ amount: "", date: todayStr(), fund_source: "", notes: "" });
   const [saving, setSaving] = useState(false);
 
@@ -139,7 +140,7 @@ function PaymentDialog({ open, onOpenChange, debt, onSaved }) {
             <Select value={form.fund_source || undefined} onValueChange={(v) => setForm((f) => ({ ...f, fund_source: v }))}>
               <SelectTrigger data-testid="payment-fund-source-select"><SelectValue placeholder="Pilih sumber dana" /></SelectTrigger>
               <SelectContent>
-                {FUND_SOURCES.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
+                {fundSourceNames.map((fs) => <SelectItem key={fs} value={fs}>{fs}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
