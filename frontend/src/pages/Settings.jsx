@@ -10,7 +10,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import ExpenseCategorySettings from "@/components/ExpenseCategorySettings";
-import { UserPlus, Trash2, ShieldAlert } from "lucide-react";
+import IncomeCategorySettings from "@/components/IncomeCategorySettings";
+import FundSourceSettings from "@/components/FundSourceSettings";
+import { UserPlus, Trash2, ShieldAlert, FolderOpen, Building2 } from "lucide-react";
 import { toast } from "sonner";
 
 function AddUserDialog({ open, onOpenChange, onSaved }) {
@@ -129,13 +131,15 @@ export default function Settings() {
     <div className="space-y-5" data-testid="settings-page">
       <div>
         <h1 className="font-heading text-2xl font-semibold tracking-tight text-slate-900">Pengaturan</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Kelola user, role akses, dan kategori pengeluaran.</p>
+        <p className="text-sm text-slate-500 mt-0.5">Kelola user, role akses, kategori pemasukan, kategori pengeluaran, dan sumber dana / bank.</p>
       </div>
 
       <Tabs defaultValue="users">
         <TabsList>
-          <TabsTrigger value="users" data-testid="settings-tab-users">User &amp; Akses</TabsTrigger>
-          <TabsTrigger value="categories" data-testid="settings-tab-categories">Kategori Pengeluaran</TabsTrigger>
+          <TabsTrigger value="users" data-testid="settings-tab-users">User & Akses</TabsTrigger>
+          <TabsTrigger value="income-categories" data-testid="settings-tab-income-categories">Kategori Pemasukan</TabsTrigger>
+          <TabsTrigger value="expense-categories" data-testid="settings-tab-expense-categories">Kategori Pengeluaran</TabsTrigger>
+          <TabsTrigger value="fund-sources" data-testid="settings-tab-fund-sources">Sumber Dana / Bank</TabsTrigger>
         </TabsList>
 
         <TabsContent value="users" className="mt-4 space-y-5">
@@ -205,8 +209,16 @@ export default function Settings() {
           </p>
         </TabsContent>
 
-        <TabsContent value="categories" className="mt-4">
+        <TabsContent value="income-categories" className="mt-4">
+          <IncomeCategorySettings />
+        </TabsContent>
+
+        <TabsContent value="expense-categories" className="mt-4">
           <ExpenseCategorySettings />
+        </TabsContent>
+
+        <TabsContent value="fund-sources" className="mt-4">
+          <FundSourceSettings />
         </TabsContent>
       </Tabs>
 

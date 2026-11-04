@@ -25,18 +25,28 @@ JWT_SECRET = os.environ['JWT_SECRET']
 
 OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "andhry.adhriyanto@gmail.com")
 
+# ============================================================
+# MASTER DATA DEFINITIONS (seeds for DB collections)
+# ============================================================
 FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"]
+
 REVENUE_CATEGORIES = ["Events", "Catering"]
 NON_REVENUE_CATEGORIES = ["Pembayaran Piutang", "Other"]
 INCOME_CATEGORIES = REVENUE_CATEGORIES + NON_REVENUE_CATEGORIES
-# Kategori pengeluaran default. Dipakai sebagai seed awal ke koleksi `expense_categories`;
-# setelah itu daftar yang berlaku diambil dari database (bisa ditambah/diubah/dihapus di Pengaturan).
+
+# Default income category groups for seeding
+DEFAULT_INCOME_GROUPS = [
+    {"group": "Revenue", "categories": REVENUE_CATEGORIES},
+    {"group": "Non-revenue", "categories": NON_REVENUE_CATEGORIES},
+]
+
+# Default expense categories (seeded once to DB, then managed in Settings)
 DEFAULT_EXPENSE_CATEGORIES = ["Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
                               "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya"]
-# Kategori yang dipakai logika sistem sehingga tidak boleh diubah namanya / dihapus:
-# "Bayar Hutang" dibuat otomatis oleh modul Hutang & Piutang, "Lainnya" adalah kategori
-# fallback yang wajib catatan.
+
+# Protected categories that cannot be renamed/deleted (system logic depends on them)
 PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Lainnya"}
+PROTECTED_INCOME_CATEGORIES = {"Pembayaran Piutang", "Other"}
 NOTE_REQUIRED_CATEGORIES = {"Other", "Lainnya"}
 
 app = FastAPI()
@@ -239,17 +249,13 @@ async def audit(user: dict, action: str, entity: str, entity_id: str, detail: st
     })
 
 
-# ---------------- Expense categories (master data, bisa diatur di Pengaturan) ----------------
+# ---------------- Expense Categories (dynamic, manageable in Settings) ----------------
 class ExpenseCategoryInput(BaseModel):
     name: str
 
 
 async def ensure_expense_categories():
-    """Seed kategori default sekali saja bila koleksi masih kosong.
-
-    Dilakukan lazy (bukan hanya saat startup) karena di Vercel serverless event startup
-    tidak selalu berjalan.
-    """
+    """Seed default expense categories once if collection is empty."""
     if await db.expense_categories.count_documents({}) > 0:
         return
     now = datetime.now(timezone.utc).isoformat()
@@ -328,7 +334,6 @@ async def update_expense_category(category_id: str, input: ExpenseCategoryInput,
         raise HTTPException(status_code=400, detail=f"Kategori \"{name}\" sudah ada")
     if name != existing["name"]:
         await db.expense_categories.update_one({"id": category_id}, {"$set": {"name": name}})
-        # Transaksi lama ikut dipindah ke nama baru agar riwayat & laporan tetap konsisten.
         await db.transactions.update_many({"type": "expense", "category": existing["name"]},
                                           {"$set": {"category": name}})
         await audit(user, "update", "expense_category", category_id, f"{existing['name']} -> {name}")
@@ -354,15 +359,242 @@ async def delete_expense_category(category_id: str, user=Depends(require_owner))
     return {"ok": True}
 
 
-# ---------------- Meta / Master data ----------------
+# ---------------- Income Categories (dynamic, grouped) ----------------
+class IncomeCategoryInput(BaseModel):
+    name: str
+    group: str  # "Revenue" or "Non-revenue"
+
+
+async def ensure_income_categories():
+    """Seed default income categories once if collection is empty."""
+    if await db.income_categories.count_documents({}) > 0:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    docs = []
+    for group in DEFAULT_INCOME_GROUPS:
+        for i, name in enumerate(group["categories"]):
+            docs.append({
+                "id": str(uuid.uuid4()),
+                "name": name,
+                "group": group["group"],
+                "order": i,
+                "created_at": now
+            })
+    if docs:
+        await db.income_categories.insert_many(docs)
+
+
+async def get_income_category_names() -> list:
+    await ensure_income_categories()
+    docs = await db.income_categories.find({}, {"_id": 0, "name": 1}).sort([("group", 1), ("order", 1)]).to_list(500)
+    return [d["name"] for d in docs]
+
+
+async def get_income_groups() -> list:
+    await ensure_income_categories()
+    docs = await db.income_categories.find({}, {"_id": 0}).sort([("group", 1), ("order", 1)]).to_list(500)
+    grouped = {}
+    for d in docs:
+        g = d.get("group", "Revenue")
+        if g not in grouped:
+            grouped[g] = {"group": g, "categories": []}
+        grouped[g]["categories"].append(d["name"])
+    return list(grouped.values())
+
+
+async def find_income_category_by_name(name: str, exclude_id: str = None):
+    q = {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    return await db.income_categories.find_one(q, {"_id": 0})
+
+
+def income_category_out(c: dict, used: int = 0) -> dict:
+    return {"id": c["id"], "name": c["name"], "group": c.get("group", "Revenue"),
+            "order": c.get("order", 0),
+            "protected": c["name"] in PROTECTED_INCOME_CATEGORIES, "usage_count": used}
+
+
+@api_router.get("/income-categories")
+async def list_income_categories(user=Depends(get_current_user)):
+    await ensure_income_categories()
+    docs = await db.income_categories.find({}, {"_id": 0}).sort([("group", 1), ("order", 1)]).to_list(500)
+    counts = {}
+    async for row in db.transactions.aggregate([
+        {"$match": {"type": "income", "category": {"$ne": None}}},
+        {"$group": {"_id": "$category", "n": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = row["n"]
+    return {"categories": [income_category_out(c, counts.get(c["name"], 0)) for c in docs]}
+
+
+@api_router.post("/income-categories")
+async def create_income_category(input: IncomeCategoryInput, user=Depends(require_owner)):
+    await ensure_income_categories()
+    name = clean_category_name(input.name)
+    if input.group not in ("Revenue", "Non-revenue"):
+        raise HTTPException(status_code=400, detail="Group harus 'Revenue' atau 'Non-revenue'")
+    if await find_income_category_by_name(name):
+        raise HTTPException(status_code=400, detail=f"Kategori \"{name}\" sudah ada")
+    last = await db.income_categories.find({"group": input.group}, {"_id": 0, "order": 1}).sort("order", -1).to_list(1)
+    doc = {"id": str(uuid.uuid4()), "name": name, "group": input.group,
+           "order": (last[0]["order"] + 1) if last else 0,
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.income_categories.insert_one(doc)
+    await audit(user, "create", "income_category", doc["id"], f"{name} ({input.group})")
+    return income_category_out(doc)
+
+
+@api_router.put("/income-categories/{category_id}")
+async def update_income_category(category_id: str, input: IncomeCategoryInput,
+                                 user=Depends(require_owner)):
+    existing = await db.income_categories.find_one({"id": category_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Kategori tidak ditemukan")
+    if existing["name"] in PROTECTED_INCOME_CATEGORIES:
+        raise HTTPException(status_code=400,
+                            detail=f"Kategori \"{existing['name']}\" dipakai sistem dan tidak bisa diubah")
+    if input.group not in ("Revenue", "Non-revenue"):
+        raise HTTPException(status_code=400, detail="Group harus 'Revenue' atau 'Non-revenue'")
+    name = clean_category_name(input.name)
+    if await find_income_category_by_name(name, exclude_id=category_id):
+        raise HTTPException(status_code=400, detail=f"Kategori \"{name}\" sudah ada")
+    if name != existing["name"] or input.group != existing.get("group", "Revenue"):
+        await db.income_categories.update_one({"id": category_id}, {"$set": {"name": name, "group": input.group}})
+        await db.transactions.update_many({"type": "income", "category": existing["name"]},
+                                          {"$set": {"category": name}})
+        await audit(user, "update", "income_category", category_id, f"{existing['name']} -> {name}")
+    return income_category_out({**existing, "name": name, "group": input.group})
+
+
+@api_router.delete("/income-categories/{category_id}")
+async def delete_income_category(category_id: str, user=Depends(require_owner)):
+    existing = await db.income_categories.find_one({"id": category_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Kategori tidak ditemukan")
+    if existing["name"] in PROTECTED_INCOME_CATEGORIES:
+        raise HTTPException(status_code=400,
+                            detail=f"Kategori \"{existing['name']}\" dipakai sistem dan tidak bisa dihapus")
+    used = await db.transactions.count_documents({"type": "income", "category": existing["name"]})
+    if used > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Kategori \"{existing['name']}\" masih dipakai {used} transaksi. "
+                   "Ubah kategori transaksi tersebut atau ganti nama kategori ini saja.")
+    await db.income_categories.delete_one({"id": category_id})
+    await audit(user, "delete", "income_category", category_id, existing["name"])
+    return {"ok": True}
+
+
+# ---------------- Fund Sources / Bank (dynamic, manageable in Settings) ----------------
+class FundSourceInput(BaseModel):
+    name: str
+
+
+async def ensure_fund_sources():
+    """Seed default fund sources once if collection is empty."""
+    if await db.fund_sources.count_documents({}) > 0:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    await db.fund_sources.insert_many([
+        {"id": str(uuid.uuid4()), "name": name, "order": i, "created_at": now}
+        for i, name in enumerate(FUND_SOURCES)
+    ])
+
+
+async def get_fund_source_names() -> list:
+    await ensure_fund_sources()
+    docs = await db.fund_sources.find({}, {"_id": 0, "name": 1}).sort("order", 1).to_list(500)
+    return [d["name"] for d in docs]
+
+
+async def find_fund_source_by_name(name: str, exclude_id: str = None):
+    q = {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    return await db.fund_sources.find_one(q, {"_id": 0})
+
+
+def fund_source_out(fs: dict, used: int = 0) -> dict:
+    return {"id": fs["id"], "name": fs["name"], "order": fs.get("order", 0), "usage_count": used}
+
+
+@api_router.get("/fund-sources")
+async def list_fund_sources(user=Depends(get_current_user)):
+    await ensure_fund_sources()
+    docs = await db.fund_sources.find({}, {"_id": 0}).sort("order", 1).to_list(500)
+    counts = {}
+    async for row in db.transactions.aggregate([
+        {"$match": {"fund_source": {"$ne": None}, "status": "final"}},
+        {"$group": {"_id": "$fund_source", "n": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = row["n"]
+    # Also count as to_fund_source for transfers
+    async for row in db.transactions.aggregate([
+        {"$match": {"to_fund_source": {"$ne": None}, "status": "final"}},
+        {"$group": {"_id": "$to_fund_source", "n": {"$sum": 1}}},
+    ]):
+        counts[row["_id"]] = counts.get(row["_id"], 0) + row["n"]
+    return {"fund_sources": [fund_source_out(fs, counts.get(fs["name"], 0)) for fs in docs]}
+
+
+@api_router.post("/fund-sources")
+async def create_fund_source(input: FundSourceInput, user=Depends(require_owner)):
+    await ensure_fund_sources()
+    name = clean_category_name(input.name)
+    if await find_fund_source_by_name(name):
+        raise HTTPException(status_code=400, detail=f"Sumber dana \"{name}\" sudah ada")
+    last = await db.fund_sources.find({}, {"_id": 0, "order": 1}).sort("order", -1).to_list(1)
+    doc = {"id": str(uuid.uuid4()), "name": name,
+           "order": (last[0]["order"] + 1) if last else 0,
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.fund_sources.insert_one(doc)
+    await audit(user, "create", "fund_source", doc["id"], name)
+    return fund_source_out(doc)
+
+
+@api_router.put("/fund-sources/{fs_id}")
+async def update_fund_source(fs_id: str, input: FundSourceInput, user=Depends(require_owner)):
+    existing = await db.fund_sources.find_one({"id": fs_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Sumber dana tidak ditemukan")
+    name = clean_category_name(input.name)
+    if await find_fund_source_by_name(name, exclude_id=fs_id):
+        raise HTTPException(status_code=400, detail=f"Sumber dana \"{name}\" sudah ada")
+    if name != existing["name"]:
+        await db.fund_sources.update_one({"id": fs_id}, {"$set": {"name": name}})
+        # Update transactions that reference this fund source
+        await db.transactions.update_many({"fund_source": existing["name"]}, {"$set": {"fund_source": name}})
+        await db.transactions.update_many({"to_fund_source": existing["name"]}, {"$set": {"to_fund_source": name}})
+        await audit(user, "update", "fund_source", fs_id, f"{existing['name']} -> {name}")
+    return fund_source_out({**existing, "name": name})
+
+
+@api_router.delete("/fund-sources/{fs_id}")
+async def delete_fund_source(fs_id: str, user=Depends(require_owner)):
+    existing = await db.fund_sources.find_one({"id": fs_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Sumber dana tidak ditemukan")
+    used = await db.transactions.count_documents({
+        "$or": [{"fund_source": existing["name"]}, {"to_fund_source": existing["name"]}],
+        "status": "final"
+    })
+    if used > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sumber dana \"{existing['name']}\" masih dipakai {used} transaksi. "
+                   "Ubah sumber dana transaksi tersebut terlebih dahulu.")
+    await db.fund_sources.delete_one({"id": fs_id})
+    await audit(user, "delete", "fund_source", fs_id, existing["name"])
+    return {"ok": True}
+
+
+# ---------------- Meta / Master data (for dropdowns in UI) ----------------
 @api_router.get("/meta")
 async def get_meta(user=Depends(get_current_user)):
     return {
-        "fund_sources": FUND_SOURCES,
-        "income_groups": [
-            {"group": "Revenue", "categories": REVENUE_CATEGORIES},
-            {"group": "Non-revenue", "categories": NON_REVENUE_CATEGORIES},
-        ],
+        "fund_sources": await get_fund_source_names(),
+        "income_groups": await get_income_groups(),
         "expense_categories": await get_expense_category_names(),
     }
 
@@ -397,15 +629,18 @@ async def validate_tx(data: dict, for_final: bool):
     if data["amount"] <= 0:
         raise HTTPException(status_code=400, detail="Nominal harus lebih dari 0")
     fs = data.get("fund_source")
-    if fs not in FUND_SOURCES:
+    if fs not in await get_fund_source_names():
         raise HTTPException(status_code=400, detail="Sumber dana tidak valid")
     if data["type"] == "transfer":
         to_fs = data.get("to_fund_source")
-        if to_fs not in FUND_SOURCES or to_fs == fs:
+        if to_fs not in await get_fund_source_names() or to_fs == fs:
             raise HTTPException(status_code=400, detail="Sumber dana tujuan tidak valid")
     else:
+        if data["type"] == "income":
+            valid = await get_income_category_names()
+        else:
+            valid = await get_expense_category_names()
         cat = data.get("category")
-        valid = INCOME_CATEGORIES if data["type"] == "income" else await get_expense_category_names()
         if cat not in valid:
             raise HTTPException(status_code=400, detail="Kategori tidak valid")
         notes = (data.get("notes") or "").strip()
@@ -454,8 +689,7 @@ async def create_transaction(input: TransactionCreate, user=Depends(require_owne
             "type": data["type"], "amount": data["amount"], "date": data["date"],
             "fund_source": data.get("fund_source"), "status": "final"}) > 0
     await db.transactions.insert_one(doc)
-    await audit(user, "create", "transaction", doc["id"],
-                f"{data['type']} {data['amount']}")
+    await audit(user, "create", "transaction", doc["id"], f"{data['type']} {data['amount']}")
     doc.pop("_id", None)
     return {"transaction": doc, "duplicate_warning": dup}
 
@@ -472,8 +706,7 @@ async def update_transaction(tx_id: str, input: TransactionCreate, user=Depends(
     await validate_tx(data, for_final=(data["status"] == "final"))
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.transactions.update_one({"id": tx_id}, {"$set": data})
-    await audit(user, "update", "transaction", tx_id,
-                f"{data['type']} {data['amount']} status={data['status']}")
+    await audit(user, "update", "transaction", tx_id, f"{data['type']} {data['amount']} status={data['status']}")
     updated = await db.transactions.find_one({"id": tx_id}, {"_id": 0})
     return {"transaction": updated}
 
@@ -484,18 +717,17 @@ async def delete_transaction(tx_id: str, user=Depends(require_owner)):
     if not existing:
         raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
     if existing.get("debt_payment_id"):
-        raise HTTPException(status_code=400,
-                            detail="Hapus pembayaran dari modul Hutang & Piutang")
+        raise HTTPException(status_code=400, detail="Hapus pembayaran dari modul Hutang & Piutang")
     await db.transactions.delete_one({"id": tx_id})
-    await audit(user, "delete", "transaction", tx_id,
-                f"{existing['type']} {existing['amount']}")
+    await audit(user, "delete", "transaction", tx_id, f"{existing['type']} {existing['amount']}")
     return {"ok": True}
 
 
 # ---------------- Balances ----------------
 @api_router.get("/balances")
 async def get_balances(user=Depends(get_current_user)):
-    result = {fs: 0.0 for fs in FUND_SOURCES}
+    fund_sources = await get_fund_source_names()
+    result = {fs: 0.0 for fs in fund_sources}
     cursor = db.transactions.find({"status": "final"},
                                   {"_id": 0, "type": 1, "amount": 1, "fund_source": 1, "to_fund_source": 1})
     async for t in cursor:
@@ -570,7 +802,7 @@ async def add_payment(debt_id: str, input: PaymentCreate, user=Depends(require_o
     debt = await db.debts.find_one({"id": debt_id}, {"_id": 0})
     if not debt:
         raise HTTPException(status_code=404, detail="Data tidak ditemukan")
-    if input.fund_source not in FUND_SOURCES:
+    if input.fund_source not in await get_fund_source_names():
         raise HTTPException(status_code=400, detail="Sumber dana tidak valid")
     paid = sum(p["amount"] for p in debt.get("payments", []))
     remaining = debt["amount"] - paid
@@ -600,8 +832,7 @@ async def add_payment(debt_id: str, input: PaymentCreate, user=Depends(require_o
     status = "lunas" if new_paid >= debt["amount"] else "parsial"
     await db.debts.update_one({"id": debt_id},
                               {"$push": {"payments": payment}, "$set": {"status": status}})
-    await audit(user, "payment", "debt", debt_id,
-                f"{debt['type']} {debt['party']} bayar {input.amount}")
+    await audit(user, "payment", "debt", debt_id, f"{debt['type']} {debt['party']} bayar {input.amount}")
     updated = await db.debts.find_one({"id": debt_id}, {"_id": 0})
     return debt_out(updated)
 
@@ -726,7 +957,7 @@ async def ai_extract(file: UploadFile = File(...), user=Depends(require_owner)):
     if cat not in INCOME_CATEGORIES + expense_categories:
         cat = None
     fs = extraction.get("suggested_fund_source")
-    if fs not in FUND_SOURCES:
+    if fs not in await get_fund_source_names():
         fs = None
     now = datetime.now(timezone.utc).isoformat()
     doc = {
@@ -742,8 +973,7 @@ async def ai_extract(file: UploadFile = File(...), user=Depends(require_owner)):
         "created_by": user["user_id"], "created_at": now, "updated_at": now,
     }
     await db.transactions.insert_one(doc)
-    await audit(user, "ai_extract", "transaction", doc["id"],
-                f"draft dari {file.filename}")
+    await audit(user, "ai_extract", "transaction", doc["id"], f"draft dari {file.filename}")
     doc.pop("_id", None)
     return {"draft": doc, "extraction": extraction}
 
