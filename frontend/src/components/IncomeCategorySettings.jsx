@@ -193,7 +193,8 @@ export default function IncomeCategorySettings() {
               </tr>
             ))}
           </tbody>
-        </table      </div>
+        </table>
+      </div>
 
       <p className="text-xs text-slate-400">
         Kategori yang sudah dipakai transaksi tidak bisa dihapus, tetapi bisa diganti nama atau pindah grup.
