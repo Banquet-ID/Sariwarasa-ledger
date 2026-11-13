@@ -271,6 +271,26 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
             </div>
           )}
 
+          {((form.type === "expense" && form.category === "Piutang") ||
+            (form.type === "income" && form.category === "Hutang")) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-4 space-y-3" data-testid="debt-link-fields">
+              <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                Detail {form.category === "Piutang" ? "Piutang" : "Hutang"}
+              </div>
+              <div className="space-y-1.5">
+                <Label>{form.category === "Piutang" ? "Pihak yang menerima pinjaman" : "Pihak pemberi pinjaman"}</Label>
+                <Input value={form.party} onChange={(e) => set("party", e.target.value)}
+                  placeholder="Nama pihak / perusahaan" data-testid="tx-debt-party-input" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Jatuh Tempo (opsional)</Label>
+                <Input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)}
+                  data-testid="tx-debt-due-date-input" />
+              </div>
+              <p className="text-xs text-amber-800">Transaksi dan saldo {form.category.toLowerCase()} otomatis tersambung ke menu Hutang &amp; Piutang.</p>
+            </div>
+          )}
+
           {form.category === "Events" && form.type === "income" && (
             <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 space-y-4" data-testid="event-fields">
               <div className="text-xs font-bold uppercase tracking-wider text-emerald-700">Detail Event (wajib)</div>
