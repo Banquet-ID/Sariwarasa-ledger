@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File, Query
-from fastapi.responses import Response as RawResponse
+from fastapi.responses import Response as RawResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,6 +14,17 @@ import json
 import re
 import bcrypt
 import jwt
+import io
+from xml.sax.saxutils import escape as xml_escape
+from collections import defaultdict
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.utils import get_column_letter
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -109,6 +120,7 @@ async def require_owner(user=Depends(get_current_user)):
 class LoginInput(BaseModel):
     email: str
     password: str
+    remember_me: bool = True
 
 
 class GoogleTokenInput(BaseModel):
@@ -135,7 +147,7 @@ async def login(input: LoginInput):
         raise HTTPException(status_code=401, detail="Email atau password salah")
     token = jwt.encode(
         {"user_id": user["user_id"], "role": user["role"],
-         "exp": datetime.now(timezone.utc) + timedelta(days=7)},
+         "exp": datetime.now(timezone.utc) + timedelta(days=30 if input.remember_me else 7)},
         JWT_SECRET, algorithm="HS256")
     return {"token": token, "user": public_user(user)}
 
@@ -164,7 +176,7 @@ async def google_login(input: GoogleTokenInput):
         await db.users.insert_one(user)
     token = jwt.encode(
         {"user_id": user["user_id"], "role": user["role"],
-         "exp": datetime.now(timezone.utc) + timedelta(days=7)},
+         "exp": datetime.now(timezone.utc) + timedelta(days=30)},
         JWT_SECRET, algorithm="HS256")
     return {"token": token, "user": public_user(user)}
 
@@ -1101,6 +1113,208 @@ async def report_pnl(month: str = None, user=Depends(get_current_user)):
                                 sorted(by_category.items(), key=lambda x: -x[1])],
         "net_profit": revenue - total_expense,
     }
+
+
+
+# ---------------- Period Reports & Export ----------------
+def _report_amount(value):
+    return float(value or 0)
+
+
+def _debt_balance_at(debt, end_date):
+    paid = sum(_report_amount(p.get("amount")) for p in debt.get("payments", [])
+               if (p.get("date") or "") <= end_date)
+    amount = _report_amount(debt.get("amount"))
+    return paid, max(0.0, amount - paid)
+
+
+async def build_period_report(start_date, end_date):
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Format tanggal harus YYYY-MM-DD")
+    if start > end:
+        raise HTTPException(status_code=400, detail="Tanggal mulai tidak boleh melewati tanggal akhir")
+    if (end - start).days > 3660:
+        raise HTTPException(status_code=400, detail="Rentang laporan maksimal 10 tahun")
+
+    sources = await get_fund_source_names()
+    opening = {s: 0.0 for s in sources}
+    movements = {s: {"income": 0.0, "expense": 0.0, "transfer_in": 0.0, "transfer_out": 0.0} for s in sources}
+    cashflow = defaultdict(lambda: {"month": "", "income": 0.0, "expense": 0.0})
+    categories = defaultdict(float)
+    revenue = non_revenue = expense_total = 0.0
+    transactions = []
+
+    async for tx in db.transactions.find(
+        {"status": "final", "date": {"$lte": end_date}}, {"_id": 0}
+    ).sort([("date", 1), ("created_at", 1)]):
+        date = tx.get("date") or ""
+        kind, amount = tx.get("type"), _report_amount(tx.get("amount"))
+        source, dest = tx.get("fund_source"), tx.get("to_fund_source")
+        if date < start_date:
+            if kind == "income": opening[source] = opening.get(source, 0.0) + amount
+            elif kind == "expense": opening[source] = opening.get(source, 0.0) - amount
+            elif kind == "transfer":
+                opening[source] = opening.get(source, 0.0) - amount
+                opening[dest] = opening.get(dest, 0.0) + amount
+        elif start_date <= date <= end_date:
+            if kind == "income": movements.setdefault(source, {"income":0.0,"expense":0.0,"transfer_in":0.0,"transfer_out":0.0})["income"] += amount
+            elif kind == "expense": movements.setdefault(source, {"income":0.0,"expense":0.0,"transfer_in":0.0,"transfer_out":0.0})["expense"] += amount
+            elif kind == "transfer":
+                movements.setdefault(source, {"income":0.0,"expense":0.0,"transfer_in":0.0,"transfer_out":0.0})["transfer_out"] += amount
+                movements.setdefault(dest, {"income":0.0,"expense":0.0,"transfer_in":0.0,"transfer_out":0.0})["transfer_in"] += amount
+            transactions.append(tx)
+            month = date[:7]
+            cashflow[month]["month"] = month
+            if kind in ("income", "expense"): cashflow[month][kind] += amount
+            category = tx.get("category") or "Tanpa Kategori"
+            if kind == "income":
+                if category in REVENUE_CATEGORIES: revenue += amount
+                else: non_revenue += amount
+            elif kind == "expense" and category not in ("Piutang", "Bayar Hutang"):
+                expense_total += amount
+                categories[category] += amount
+
+    balances = []
+    for name in sources:
+        m = movements[name]
+        closing = opening[name] + m["income"] - m["expense"] + m["transfer_in"] - m["transfer_out"]
+        balances.append({"name":name,"opening":opening[name],**m,"closing":closing})
+
+    debts = []
+    async for debt in db.debts.find({"date": {"$lte": end_date}}, {"_id": 0}):
+        paid, remaining = _debt_balance_at(debt, end_date)
+        debts.append({"id":debt.get("id"),"type":debt.get("type"),"party":debt.get("party"),
+            "date":debt.get("date"),"due_date":debt.get("due_date"),"amount":_report_amount(debt.get("amount")),
+            "paid":paid,"remaining":remaining,"status":"Lunas" if remaining <= 0 else "Outstanding"})
+
+    flow = [cashflow[k] for k in sorted(cashflow)]
+    return {
+        "start_date":start_date,"end_date":end_date,"transactions":transactions,
+        "transaction_count":len(transactions),"revenue":revenue,"non_revenue":non_revenue,
+        "total_expense":expense_total,"net_profit":revenue-expense_total,
+        "total_income_cash":sum(x["income"] for x in flow),
+        "total_expense_cash":sum(x["expense"] for x in flow),"cashflow":flow,
+        "expense_by_category":[{"category":k,"total":v} for k,v in sorted(categories.items(),key=lambda x:-x[1])],
+        "balances":balances,"balance_total_opening":sum(x["opening"] for x in balances),
+        "balance_total_closing":sum(x["closing"] for x in balances),"debts":debts,
+        "debt_outstanding":sum(x["remaining"] for x in debts if x["type"]=="hutang"),
+        "receivable_outstanding":sum(x["remaining"] for x in debts if x["type"]=="piutang"),
+    }
+
+
+@api_router.get("/reports/period")
+async def report_period(start_date: str, end_date: str, user=Depends(get_current_user)):
+    return await build_period_report(start_date, end_date)
+
+
+@api_router.get("/reports/export")
+async def export_period_report(start_date: str, end_date: str,
+    format: str = Query("xlsx", regex="^(pdf|xlsx)$"), user=Depends(get_current_user)):
+    r = await build_period_report(start_date, end_date)
+    filename = f"sariwarasa-report-{start_date}-to-{end_date}"
+
+    if format == "xlsx":
+        wb = Workbook()
+        ws = wb.active; ws.title = "Summary"
+        ws.append(["SARIWARASA - LAPORAN KEUANGAN"])
+        ws.append(["Periode", start_date, "s.d.", end_date]); ws.append([])
+        ws.append(["Indikator", "Nilai (IDR)"])
+        metrics = [
+            ("Revenue",r["revenue"]),("Non-Revenue",r["non_revenue"]),
+            ("Pengeluaran Operasional",r["total_expense"]),("Laba Bersih",r["net_profit"]),
+            ("Pemasukan Kas",r["total_income_cash"]),("Pengeluaran Kas",r["total_expense_cash"]),
+            ("Saldo Awal",r["balance_total_opening"]),("Saldo Akhir",r["balance_total_closing"]),
+            ("Hutang Outstanding",r["debt_outstanding"]),("Piutang Outstanding",r["receivable_outstanding"]),
+            ("Jumlah Transaksi",r["transaction_count"])]
+        for row in metrics: ws.append(list(row))
+
+        ws=wb.create_sheet("P&L")
+        ws.append(["Kategori","Nilai (IDR)"])
+        for row in [("Revenue",r["revenue"]),("Non-Revenue",r["non_revenue"]),
+                    ("Total Pengeluaran",r["total_expense"]),("Laba Bersih",r["net_profit"])]:
+            ws.append(list(row))
+        ws.append([]); ws.append(["Pengeluaran per Kategori","Nilai (IDR)"])
+        for x in r["expense_by_category"]: ws.append([x["category"],x["total"]])
+
+        ws=wb.create_sheet("Cash Flow")
+        ws.append(["Bulan","Pemasukan","Pengeluaran","Net Cash Flow"])
+        for x in r["cashflow"]: ws.append([x["month"],x["income"],x["expense"],x["income"]-x["expense"]])
+        ws.append(["TOTAL",r["total_income_cash"],r["total_expense_cash"],r["total_income_cash"]-r["total_expense_cash"]])
+
+        ws=wb.create_sheet("Saldo")
+        ws.append(["Sumber Dana","Saldo Awal","Pemasukan","Pengeluaran","Transfer Masuk","Transfer Keluar","Saldo Akhir"])
+        for x in r["balances"]: ws.append([x["name"],x["opening"],x["income"],x["expense"],x["transfer_in"],x["transfer_out"],x["closing"]])
+        ws.append(["TOTAL",r["balance_total_opening"],sum(x["income"] for x in r["balances"]),
+            sum(x["expense"] for x in r["balances"]),sum(x["transfer_in"] for x in r["balances"]),
+            sum(x["transfer_out"] for x in r["balances"]),r["balance_total_closing"]])
+
+        ws=wb.create_sheet("Hutang-Piutang")
+        ws.append(["Jenis","Pihak","Tanggal","Jatuh Tempo","Nilai Awal","Sudah Dibayar","Sisa Akhir Periode","Status"])
+        for x in r["debts"]: ws.append([x["type"],x["party"],x["date"],x["due_date"],x["amount"],x["paid"],x["remaining"],x["status"]])
+
+        ws=wb.create_sheet("Detail Transaksi")
+        ws.append(["Tanggal","Jenis","Kategori","Deskripsi","Event","Sumber Dana","Tujuan Transfer","Nominal (IDR)","Status"])
+        for x in r["transactions"]:
+            ws.append([x.get("date"),x.get("type"),x.get("category"),x.get("notes"),x.get("event_name"),
+                       x.get("fund_source"),x.get("to_fund_source"),_report_amount(x.get("amount")),x.get("status")])
+
+        header=PatternFill("solid",fgColor="17365D")
+        for sheet in wb.worksheets:
+            sheet.freeze_panes="A2"
+            for cell in sheet[1]:
+                cell.font=Font(bold=True,color="FFFFFF"); cell.fill=header
+            for col in sheet.columns:
+                letter=get_column_letter(col[0].column)
+                width=max((len(str(c.value or "")) for c in col),default=12)
+                sheet.column_dimensions[letter].width=min(max(width+2,14),42)
+            for row in sheet.iter_rows(min_row=2):
+                for cell in row:
+                    if isinstance(cell.value,(int,float)): cell.number_format='#,##0;[Red]-#,##0'
+        stream=io.BytesIO(); wb.save(stream); stream.seek(0)
+        return StreamingResponse(stream,media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":f'attachment; filename="{filename}.xlsx"'})
+
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name="ReportSmall",parent=styles["BodyText"],fontSize=7,leading=9))
+    stream=io.BytesIO()
+    doc=SimpleDocTemplate(stream,pagesize=landscape(A4),rightMargin=10*mm,leftMargin=10*mm,topMargin=10*mm,bottomMargin=10*mm)
+    story=[Paragraph("SARIWARASA - LAPORAN KEUANGAN",styles["Title"]),
+           Paragraph(f"Periode: {start_date} s.d. {end_date}",styles["Normal"]),Spacer(1,5*mm)]
+    summary=[["Indikator","Nilai (IDR)"]]+[[k,f"{v:,.0f}" if isinstance(v,(int,float)) else str(v)] for k,v in [
+        ("Revenue",r["revenue"]),("Non-Revenue",r["non_revenue"]),("Pengeluaran Operasional",r["total_expense"]),
+        ("Laba Bersih",r["net_profit"]),("Pemasukan Kas",r["total_income_cash"]),("Pengeluaran Kas",r["total_expense_cash"]),
+        ("Saldo Awal",r["balance_total_opening"]),("Saldo Akhir",r["balance_total_closing"]),
+        ("Hutang Outstanding",r["debt_outstanding"]),("Piutang Outstanding",r["receivable_outstanding"]),("Jumlah Transaksi",r["transaction_count"])]]
+    table_style=TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),.3,colors.HexColor("#CBD5E1")),("FONTSIZE",(0,0),(-1,-1),8),("PADDING",(0,0),(-1,-1),4)])
+    story += [Paragraph("Ringkasan",styles["Heading2"]),Table(summary,colWidths=[80*mm,50*mm],style=table_style),Spacer(1,4*mm)]
+    cats=[["Kategori Pengeluaran","Total (IDR)"]]+[[x["category"],f'{x["total"]:,.0f}'] for x in r["expense_by_category"]]
+    if len(cats)==1: cats.append(["Tidak ada pengeluaran","0"])
+    story += [Paragraph("Pengeluaran per Kategori",styles["Heading2"]),Table(cats,style=table_style),Spacer(1,4*mm)]
+    bal=[["Sumber Dana","Saldo Awal","Pemasukan","Pengeluaran","Transfer Masuk","Transfer Keluar","Saldo Akhir"]]
+    for x in r["balances"]: bal.append([x["name"]]+[f'{x[k]:,.0f}' for k in ("opening","income","expense","transfer_in","transfer_out","closing")])
+    story += [Paragraph("Saldo per Sumber Dana",styles["Heading2"]),Table(bal,repeatRows=1,style=table_style),Spacer(1,4*mm)]
+    debt=[["Jenis","Pihak","Tanggal","Jatuh Tempo","Nilai Awal","Dibayar","Sisa","Status"]]
+    for x in r["debts"]: debt.append([x["type"],x["party"],x["date"],x["due_date"] or "-",f'{x["amount"]:,.0f}',f'{x["paid"]:,.0f}',f'{x["remaining"]:,.0f}',x["status"]])
+    if len(debt)==1: debt.append(["-","Tidak ada data","-","-","0","0","0","-"])
+    story += [Paragraph("Hutang & Piutang per Akhir Periode",styles["Heading2"]),Table(debt,repeatRows=1,style=table_style),PageBreak(),Paragraph("Detail Transaksi",styles["Heading2"])]
+    detail=[["Tanggal","Jenis","Kategori","Deskripsi","Event","Sumber Dana","Tujuan","Nominal"]]
+    for x in r["transactions"]:
+        detail.append([x.get("date") or "-",x.get("type") or "-",x.get("category") or "-",
+            Paragraph(xml_escape(str(x.get("notes") or "-")[:150]),styles["ReportSmall"]),
+            Paragraph(xml_escape(str(x.get("event_name") or "-")[:70]),styles["ReportSmall"]),
+            x.get("fund_source") or "-",x.get("to_fund_source") or "-",f'{_report_amount(x.get("amount")):,.0f}'])
+    if len(detail)==1: detail.append(["-","-","-","Tidak ada transaksi","-","-","-","0"])
+    story.append(Table(detail,repeatRows=1,colWidths=[22*mm,17*mm,25*mm,53*mm,34*mm,25*mm,22*mm,25*mm],
+        style=TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),.25,colors.HexColor("#CBD5E1")),("FONTSIZE",(0,0),(-1,-1),7),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),3)])))
+    doc.build(story); stream.seek(0)
+    return StreamingResponse(stream,media_type="application/pdf",
+        headers={"Content-Disposition":f'attachment; filename="{filename}.pdf"'})
 
 
 # ---------------- Startup ----------------

@@ -16,6 +16,7 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID || document.getElementById("gsi-script")) return;
@@ -53,7 +54,7 @@ export default function Login() {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await login(email, password);
+      await login(email, password, rememberMe);
       navigate("/", { replace: true });
     } catch (err) {
       toast.error(err.response?.data?.detail || "Login gagal");
@@ -118,6 +119,15 @@ export default function Login() {
                 placeholder="••••••••"
               />
             </div>
+            <label className="flex items-center gap-2 text-sm text-slate-600 select-none">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 accent-slate-900"
+              />
+              Ingat saya <span className="text-xs text-slate-400">(tetap masuk hingga 30 hari)</span>
+            </label>
             <Button
               type="submit"
               data-testid="login-submit-btn"
