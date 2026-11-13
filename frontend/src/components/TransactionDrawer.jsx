@@ -15,7 +15,7 @@ import { Sparkles, Loader2, AlertTriangle, Paperclip, ImageIcon } from "lucide-r
 const EMPTY = {
   type: "income", amount: "", date: todayStr(), category: "", fund_source: "",
   to_fund_source: "", notes: "", event_name: "", event_location: "", event_pic: "",
-  attachment_path: "",
+  party: "", due_date: "", attachment_path: "",
 };
 
 export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx, preset }) {
@@ -65,6 +65,8 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
         event_name: editTx.event_name || "",
         event_location: editTx.event_location || "",
         event_pic: editTx.event_pic || "",
+        party: editTx.party || "",
+        due_date: editTx.due_date || "",
         attachment_path: editTx.attachment_path || "",
       });
     } else {
@@ -138,6 +140,9 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
       event_location: form.event_location || null,
       event_pic: form.event_pic || null,
       attachment_path: form.attachment_path || null,
+      party: (form.type === "expense" && form.category === "Piutang") ||
+             (form.type === "income" && form.category === "Hutang") ? form.party.trim() : null,
+      due_date: (form.category === "Piutang" || form.category === "Hutang") ? form.due_date || null : null,
       status: isDraftContext ? "final" : editTx ? editTx.status : "final",
     };
     try {
@@ -263,6 +268,26 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
               {(form.category === "Other" || form.category === "Lainnya") && (
                 <p className="text-xs text-amber-700 font-medium">Kategori ini wajib mengisi catatan penjelasan.</p>
               )}
+            </div>
+          )}
+
+          {((form.type === "expense" && form.category === "Piutang") ||
+            (form.type === "income" && form.category === "Hutang")) && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/60 p-4 space-y-3" data-testid="debt-link-fields">
+              <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                Detail {form.category === "Piutang" ? "Piutang" : "Hutang"}
+              </div>
+              <div className="space-y-1.5">
+                <Label>{form.category === "Piutang" ? "Pihak yang menerima pinjaman" : "Pihak pemberi pinjaman"}</Label>
+                <Input value={form.party} onChange={(e) => set("party", e.target.value)}
+                  placeholder="Nama pihak / perusahaan" data-testid="tx-debt-party-input" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Jatuh Tempo (opsional)</Label>
+                <Input type="date" value={form.due_date} onChange={(e) => set("due_date", e.target.value)}
+                  data-testid="tx-debt-due-date-input" />
+              </div>
+              <p className="text-xs text-amber-800">Transaksi dan saldo {form.category.toLowerCase()} otomatis tersambung ke menu Hutang &amp; Piutang.</p>
             </div>
           )}
 
