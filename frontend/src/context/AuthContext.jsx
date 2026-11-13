@@ -8,14 +8,24 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    const token = localStorage.getItem("sw_token");
+    if (!token) {
+      setLoading(false);
+      return;
+    }
     api.get("/auth/me")
       .then((r) => setUser(r.data))
-      .catch(() => setUser(null))
+      .catch(() => {
+        localStorage.removeItem("sw_token");
+        setUser(null);
+      })
       .finally(() => setLoading(false));
   }, []);
 
-  const login = useCallback(async (email, password) => {
-    const r = await api.post("/auth/login", { email, password });
+  const login = useCallback(async (email, password, rememberMe = true) => {
+    const r = await api.post("/auth/login", {
+      email, password, remember_me: rememberMe,
+    });
     localStorage.setItem("sw_token", r.data.token);
     setUser(r.data.user);
     return r.data.user;
