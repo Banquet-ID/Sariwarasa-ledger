@@ -31,7 +31,7 @@ OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "andhry.adhriyanto@gmail.com")
 FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"]
 
 REVENUE_CATEGORIES = ["Events", "Catering"]
-NON_REVENUE_CATEGORIES = ["Pembayaran Piutang", "Other"]
+NON_REVENUE_CATEGORIES = ["Pembayaran Piutang", "Hutang", "Other"]
 INCOME_CATEGORIES = REVENUE_CATEGORIES + NON_REVENUE_CATEGORIES
 
 # Default income category groups for seeding
@@ -42,11 +42,11 @@ DEFAULT_INCOME_GROUPS = [
 
 # Default expense categories (seeded once to DB, then managed in Settings)
 DEFAULT_EXPENSE_CATEGORIES = ["Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
-                              "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya"]
+                              "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Piutang", "Akomodasi", "Lainnya"]
 
 # Protected categories that cannot be renamed/deleted (system logic depends on them)
-PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Lainnya"}
-PROTECTED_INCOME_CATEGORIES = {"Pembayaran Piutang", "Other"}
+PROTECTED_EXPENSE_CATEGORIES = {"Bayar Hutang", "Piutang", "Lainnya"}
+PROTECTED_INCOME_CATEGORIES = {"Pembayaran Piutang", "Hutang", "Other"}
 NOTE_REQUIRED_CATEGORIES = {"Other", "Lainnya"}
 
 app = FastAPI()
@@ -256,13 +256,17 @@ class ExpenseCategoryInput(BaseModel):
 
 async def ensure_expense_categories():
     """Seed default expense categories once if collection is empty."""
-    if await db.expense_categories.count_documents({}) > 0:
-        return
     now = datetime.now(timezone.utc).isoformat()
-    await db.expense_categories.insert_many([
-        {"id": str(uuid.uuid4()), "name": name, "order": i, "created_at": now}
-        for i, name in enumerate(DEFAULT_EXPENSE_CATEGORIES)
-    ])
+    existing = await db.expense_categories.find({}, {"_id": 0, "name": 1}).to_list(500)
+    names = {d["name"] for d in existing}
+    missing = [name for name in DEFAULT_EXPENSE_CATEGORIES if name not in names]
+    if missing:
+        last = await db.expense_categories.find({}, {"_id": 0, "order": 1}).sort("order", -1).to_list(1)
+        start = (last[0]["order"] + 1) if last else 0
+        await db.expense_categories.insert_many([
+            {"id": str(uuid.uuid4()), "name": name, "order": start + i, "created_at": now}
+            for i, name in enumerate(missing)
+        ])
 
 
 async def get_expense_category_names() -> list:
@@ -367,19 +371,18 @@ class IncomeCategoryInput(BaseModel):
 
 async def ensure_income_categories():
     """Seed default income categories once if collection is empty."""
-    if await db.income_categories.count_documents({}) > 0:
-        return
     now = datetime.now(timezone.utc).isoformat()
+    existing = await db.income_categories.find({}, {"_id": 0, "name": 1}).to_list(500)
+    names = {d["name"] for d in existing}
     docs = []
     for group in DEFAULT_INCOME_GROUPS:
-        for i, name in enumerate(group["categories"]):
-            docs.append({
-                "id": str(uuid.uuid4()),
-                "name": name,
-                "group": group["group"],
-                "order": i,
-                "created_at": now
-            })
+        current = await db.income_categories.find({"group": group["group"]}, {"_id": 0, "order": 1}).sort("order", -1).to_list(1)
+        start = (current[0]["order"] + 1) if current else 0
+        for name in group["categories"]:
+            if name not in names:
+                docs.append({"id": str(uuid.uuid4()), "name": name, "group": group["group"],
+                             "order": start + len([d for d in docs if d["group"] == group["group"]]),
+                             "created_at": now})
     if docs:
         await db.income_categories.insert_many(docs)
 
@@ -623,6 +626,8 @@ class TransactionCreate(BaseModel):
     event_location: Optional[str] = None
     event_pic: Optional[str] = None
     attachment_path: Optional[str] = None
+    party: Optional[str] = None
+    due_date: Optional[str] = None
     status: str = "final"
 
 
@@ -651,6 +656,9 @@ async def validate_tx(data: dict, for_final: bool):
         notes = (data.get("notes") or "").strip()
         if cat in NOTE_REQUIRED_CATEGORIES and not notes:
             raise HTTPException(status_code=400, detail=f"Kategori {cat} wajib mengisi catatan")
+        if cat in ("Piutang", "Hutang"):
+            if not (data.get("party") or "").strip():
+                raise HTTPException(status_code=400, detail="Nama pihak terkait wajib diisi")
         if cat == "Events":
             if not (data.get("event_name") or "").strip():
                 raise HTTPException(status_code=400, detail="Nama event wajib diisi")
@@ -685,15 +693,30 @@ async def create_transaction(input: TransactionCreate, user=Depends(require_owne
     data = input.model_dump()
     await validate_tx(data, for_final=(data["status"] == "final"))
     now = datetime.now(timezone.utc).isoformat()
+    debt_id = None
+    is_debt_origin = (data["type"] == "expense" and data.get("category") == "Piutang") or (
+        data["type"] == "income" and data.get("category") == "Hutang")
+    if is_debt_origin:
+        debt_id = str(uuid.uuid4())
+        debt_type = "piutang" if data["category"] == "Piutang" else "hutang"
+        debt = {"id": debt_id, "type": debt_type, "party": data["party"].strip(),
+                "amount": data["amount"], "date": data["date"], "due_date": data.get("due_date"),
+                "notes": data.get("notes") or "", "payments": [], "status": "outstanding",
+                "origin_transaction_id": None, "created_by": user["user_id"], "created_at": now}
     doc = {"id": str(uuid.uuid4()), **data, "source": "manual", "ai_extraction": None,
-           "debt_id": None, "debt_payment_id": None,
+           "debt_id": debt_id, "debt_payment_id": None,
            "created_by": user["user_id"], "created_at": now, "updated_at": now}
+    if is_debt_origin:
+        debt["origin_transaction_id"] = doc["id"]
     dup = False
     if data["status"] == "final":
         dup = await db.transactions.count_documents({
             "type": data["type"], "amount": data["amount"], "date": data["date"],
             "fund_source": data.get("fund_source"), "status": "final"}) > 0
     await db.transactions.insert_one(doc)
+    if is_debt_origin:
+        await db.debts.insert_one(debt)
+        await audit(user, "create", "debt", debt_id, f"{debt_type} {debt['party']} {debt['amount']}")
     await audit(user, "create", "transaction", doc["id"], f"{data['type']} {data['amount']}")
     doc.pop("_id", None)
     return {"transaction": doc, "duplicate_warning": dup}
@@ -704,9 +727,9 @@ async def update_transaction(tx_id: str, input: TransactionCreate, user=Depends(
     existing = await db.transactions.find_one({"id": tx_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
-    if existing.get("debt_payment_id"):
+    if existing.get("debt_payment_id") or existing.get("debt_id"):
         raise HTTPException(status_code=400,
-                            detail="Transaksi pembayaran hutang/piutang hanya bisa diubah dari modul Hutang & Piutang")
+                            detail="Transaksi terkait hutang/piutang hanya bisa dikelola dari modul Hutang & Piutang")
     data = input.model_dump()
     await validate_tx(data, for_final=(data["status"] == "final"))
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -721,8 +744,8 @@ async def delete_transaction(tx_id: str, user=Depends(require_owner)):
     existing = await db.transactions.find_one({"id": tx_id}, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Transaksi tidak ditemukan")
-    if existing.get("debt_payment_id"):
-        raise HTTPException(status_code=400, detail="Hapus pembayaran dari modul Hutang & Piutang")
+    if existing.get("debt_payment_id") or existing.get("debt_id"):
+        raise HTTPException(status_code=400, detail="Hapus data terkait dari modul Hutang & Piutang")
     await db.transactions.delete_one({"id": tx_id})
     await audit(user, "delete", "transaction", tx_id, f"{existing['type']} {existing['amount']}")
     return {"ok": True}
@@ -868,6 +891,8 @@ async def delete_debt(debt_id: str, user=Depends(require_owner)):
         raise HTTPException(status_code=404, detail="Data tidak ditemukan")
     for p in debt.get("payments", []):
         await db.transactions.delete_one({"id": p["transaction_id"]})
+    if debt.get("origin_transaction_id"):
+        await db.transactions.delete_one({"id": debt["origin_transaction_id"]})
     await db.debts.delete_one({"id": debt_id})
     await audit(user, "delete", "debt", debt_id, f"{debt['type']} {debt['party']}")
     return {"ok": True}
@@ -996,7 +1021,7 @@ async def report_summary(user=Depends(get_current_user)):
                 revenue_total += t["amount"]
             else:
                 non_revenue_total += t["amount"]
-        else:
+        elif t.get("category") != "Piutang":
             expense_total += t["amount"]
     hutang_out = piutang_out = 0.0
     async for d in db.debts.find({}, {"_id": 0, "type": 1, "amount": 1, "payments": 1}):
@@ -1051,7 +1076,7 @@ async def report_pnl(month: str = None, user=Depends(get_current_user)):
                 revenue += t["amount"]
             else:
                 non_revenue += t["amount"]
-        else:
+        elif t.get("category") != "Piutang":
             total_expense += t["amount"]
             by_category[t["category"]] = by_category.get(t["category"], 0) + t["amount"]
     return {
