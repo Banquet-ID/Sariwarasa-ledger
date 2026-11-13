@@ -15,7 +15,7 @@ import { Sparkles, Loader2, AlertTriangle, Paperclip, ImageIcon } from "lucide-r
 const EMPTY = {
   type: "income", amount: "", date: todayStr(), category: "", fund_source: "",
   to_fund_source: "", notes: "", event_name: "", event_location: "", event_pic: "",
-  attachment_path: "",
+  party: "", due_date: "", attachment_path: "",
 };
 
 export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx, preset }) {
@@ -65,6 +65,8 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
         event_name: editTx.event_name || "",
         event_location: editTx.event_location || "",
         event_pic: editTx.event_pic || "",
+        party: editTx.party || "",
+        due_date: editTx.due_date || "",
         attachment_path: editTx.attachment_path || "",
       });
     } else {
@@ -138,6 +140,9 @@ export default function TransactionDrawer({ open, onOpenChange, onSaved, editTx,
       event_location: form.event_location || null,
       event_pic: form.event_pic || null,
       attachment_path: form.attachment_path || null,
+      party: (form.type === "expense" && form.category === "Piutang") ||
+             (form.type === "income" && form.category === "Hutang") ? form.party.trim() : null,
+      due_date: (form.category === "Piutang" || form.category === "Hutang") ? form.due_date || null : null,
       status: isDraftContext ? "final" : editTx ? editTx.status : "final",
     };
     try {
