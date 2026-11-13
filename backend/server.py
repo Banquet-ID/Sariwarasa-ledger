@@ -15,6 +15,7 @@ import re
 import bcrypt
 import jwt
 import io
+from xml.sax.saxutils import escape as xml_escape
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -1302,8 +1303,8 @@ async def export_period_report(start_date: str, end_date: str,
     detail=[["Tanggal","Jenis","Kategori","Deskripsi","Event","Sumber Dana","Tujuan","Nominal"]]
     for x in r["transactions"]:
         detail.append([x.get("date") or "-",x.get("type") or "-",x.get("category") or "-",
-            Paragraph(str(x.get("notes") or "-")[:150],styles["ReportSmall"]),
-            Paragraph(str(x.get("event_name") or "-")[:70],styles["ReportSmall"]),
+            Paragraph(xml_escape(str(x.get("notes") or "-")[:150]),styles["ReportSmall"]),
+            Paragraph(xml_escape(str(x.get("event_name") or "-")[:70]),styles["ReportSmall"]),
             x.get("fund_source") or "-",x.get("to_fund_source") or "-",f'{_report_amount(x.get("amount")):,.0f}'])
     if len(detail)==1: detail.append(["-","-","-","Tidak ada transaksi","-","-","-","0"])
     story.append(Table(detail,repeatRows=1,colWidths=[22*mm,17*mm,25*mm,53*mm,34*mm,25*mm,22*mm,25*mm],
