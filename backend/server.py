@@ -1076,7 +1076,7 @@ async def report_pnl(month: str = None, user=Depends(get_current_user)):
                 revenue += t["amount"]
             else:
                 non_revenue += t["amount"]
-        elif t.get("category") != "Piutang":
+        elif t.get("category") not in ("Piutang", "Bayar Hutang"):
             total_expense += t["amount"]
             by_category[t["category"]] = by_category.get(t["category"], 0) + t["amount"]
     return {
