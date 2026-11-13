@@ -5,21 +5,21 @@ export const FUND_SOURCES = ["Cash", "BCA 1", "BCA 2", "Mandiri", "BNI", "Other"
 
 export const INCOME_GROUPS = [
   { group: "Revenue", categories: ["Events", "Catering"] },
-  { group: "Non-revenue", categories: ["Pembayaran Piutang", "Other"] },
+  { group: "Non-revenue", categories: ["Pembayaran Piutang", "Hutang", "Other"] },
 ];
 
 // Fallback only. Runtime categories come from API /expense-categories
 export const EXPENSE_CATEGORIES = [
   "Buah", "Guest Supplies", "Cup", "Transportasi", "Sewa Tempat",
-  "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Akomodasi", "Lainnya",
+  "Operational Event", "Marketing", "Printing", "Bayar Hutang", "Piutang", "Akomodasi", "Lainnya",
 ];
 
 // Fallback only. Runtime categories come from API /income-categories
 export const REVENUE_CATEGORIES = ["Events", "Catering"];
 
 // Protected categories that cannot be deleted/renamed (system logic depends on them)
-export const PROTECTED_EXPENSE_CATEGORIES = new Set(["Bayar Hutang", "Lainnya"]);
-export const PROTECTED_INCOME_CATEGORIES = new Set(["Pembayaran Piutang", "Other"]);
+export const PROTECTED_EXPENSE_CATEGORIES = new Set(["Bayar Hutang", "Piutang", "Lainnya"]);
+export const PROTECTED_INCOME_CATEGORIES = new Set(["Pembayaran Piutang", "Hutang", "Other"]);
 export const NOTE_REQUIRED_CATEGORIES = new Set(["Other", "Lainnya"]);
 
 
