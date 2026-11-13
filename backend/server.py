@@ -120,6 +120,7 @@ async def require_owner(user=Depends(get_current_user)):
 class LoginInput(BaseModel):
     email: str
     password: str
+    remember_me: bool = True
 
 
 class GoogleTokenInput(BaseModel):
@@ -146,7 +147,7 @@ async def login(input: LoginInput):
         raise HTTPException(status_code=401, detail="Email atau password salah")
     token = jwt.encode(
         {"user_id": user["user_id"], "role": user["role"],
-         "exp": datetime.now(timezone.utc) + timedelta(days=7)},
+         "exp": datetime.now(timezone.utc) + timedelta(days=30 if input.remember_me else 7)},
         JWT_SECRET, algorithm="HS256")
     return {"token": token, "user": public_user(user)}
 
@@ -175,7 +176,7 @@ async def google_login(input: GoogleTokenInput):
         await db.users.insert_one(user)
     token = jwt.encode(
         {"user_id": user["user_id"], "role": user["role"],
-         "exp": datetime.now(timezone.utc) + timedelta(days=7)},
+         "exp": datetime.now(timezone.utc) + timedelta(days=30)},
         JWT_SECRET, algorithm="HS256")
     return {"token": token, "user": public_user(user)}
 
