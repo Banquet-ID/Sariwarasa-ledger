@@ -694,8 +694,9 @@ async def create_transaction(input: TransactionCreate, user=Depends(require_owne
     await validate_tx(data, for_final=(data["status"] == "final"))
     now = datetime.now(timezone.utc).isoformat()
     debt_id = None
-    is_debt_origin = (data["type"] == "expense" and data.get("category") == "Piutang") or (
-        data["type"] == "income" and data.get("category") == "Hutang")
+    is_debt_origin = data["status"] == "final" and (
+        (data["type"] == "expense" and data.get("category") == "Piutang") or
+        (data["type"] == "income" and data.get("category") == "Hutang"))
     if is_debt_origin:
         debt_id = str(uuid.uuid4())
         debt_type = "piutang" if data["category"] == "Piutang" else "hutang"
