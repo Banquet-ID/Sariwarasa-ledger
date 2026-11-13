@@ -732,7 +732,21 @@ async def update_transaction(tx_id: str, input: TransactionCreate, user=Depends(
                             detail="Transaksi terkait hutang/piutang hanya bisa dikelola dari modul Hutang & Piutang")
     data = input.model_dump()
     await validate_tx(data, for_final=(data["status"] == "final"))
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    is_debt_origin = data["status"] == "final" and (
+        (data["type"] == "expense" and data.get("category") == "Piutang") or
+        (data["type"] == "income" and data.get("category") == "Hutang"))
+    if is_debt_origin:
+        debt_id = str(uuid.uuid4())
+        debt_type = "piutang" if data["category"] == "Piutang" else "hutang"
+        debt = {"id": debt_id, "type": debt_type, "party": data["party"].strip(),
+                "amount": data["amount"], "date": data["date"], "due_date": data.get("due_date"),
+                "notes": data.get("notes") or "", "payments": [], "status": "outstanding",
+                "origin_transaction_id": tx_id, "created_by": user["user_id"], "created_at": now}
+        await db.debts.insert_one(debt)
+        data["debt_id"] = debt_id
+        await audit(user, "create", "debt", debt_id, f"{debt_type} {debt['party']} {debt['amount']}")
+    data["updated_at"] = now
     await db.transactions.update_one({"id": tx_id}, {"$set": data})
     await audit(user, "update", "transaction", tx_id, f"{data['type']} {data['amount']} status={data['status']}")
     updated = await db.transactions.find_one({"id": tx_id}, {"_id": 0})
