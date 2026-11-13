@@ -943,7 +943,7 @@ Ekstrak dan kembalikan HANYA JSON valid tanpa markdown, tanpa penjelasan:
  "confidence": "high|medium|low",
  "warnings": ["hal yang ambigu atau perlu dicek user"]
 }
-Kategori pemasukan: Events, Catering, Pembayaran Piutang, Other.
+Kategori pemasukan: Events, Catering, Pembayaran Piutang, Hutang, Other.
 Kategori pengeluaran: __EXPENSE_CATEGORIES__.
 Aturan: struk belanja/tagihan keluar -> expense. Uang masuk/transfer masuk -> income. Jika ambigu, type="unknown" dan jelaskan di warnings. Untuk mutasi bank, pilih transaksi yang paling jelas."""
 
@@ -1021,7 +1021,7 @@ async def report_summary(user=Depends(get_current_user)):
                 revenue_total += t["amount"]
             else:
                 non_revenue_total += t["amount"]
-        elif t.get("category") != "Piutang":
+        elif t.get("category") not in ("Piutang", "Bayar Hutang"):
             expense_total += t["amount"]
     hutang_out = piutang_out = 0.0
     async for d in db.debts.find({}, {"_id": 0, "type": 1, "amount": 1, "payments": 1}):
